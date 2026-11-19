@@ -32,7 +32,7 @@ export function SplashScreen({ lockedGender, onComplete }: SplashScreenProps) {
         className="text-center"
       >
         <h1 className="font-wordmark text-[42px] leading-none tracking-[-0.02em]">
-          couply
+          couplova
         </h1>
       </motion.div>
     </main>

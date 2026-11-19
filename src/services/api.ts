@@ -1,10 +1,14 @@
 import type { ActiveDeckThemeId, GenderTheme } from '../constants/theme';
 import {
+  clearAdminSession,
   clearAuthSession,
   getStoredAccessToken,
+  getStoredAdminToken,
   getStoredRefreshToken,
+  saveAdminSession,
   saveAuthSession,
   updateStoredUser,
+  type CoupleIou,
   type CouplyUser,
 } from './storage';
 
@@ -41,36 +45,52 @@ export class ApiError extends Error {
   }
 }
 
+let inFlightRefresh: Promise<string | null> | null = null;
+
 async function refreshAccessToken(): Promise<string | null> {
-  const refreshToken = getStoredRefreshToken();
-  if (!refreshToken) return null;
-
-  const res = await fetch('/api/auth/refresh', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ refreshToken }),
-  });
-
-  if (!res.ok) {
-    const errBody = await res.json().catch(() => ({}));
-    clearAuthSession();
-    if (errBody.code === 'SESSION_EXPIRED_INACTIVITY') {
-      sessionExpiredListener?.('Signed out after 30 days of inactivity.');
-    }
-    return null;
+  if (inFlightRefresh) {
+    return inFlightRefresh;
   }
 
-  const data = (await res.json()) as {
-    accessToken: string;
-    refreshToken?: string;
-    user: CouplyUser;
-  };
-  saveAuthSession({
-    accessToken: data.accessToken,
-    refreshToken: data.refreshToken,
-    user: data.user,
-  });
-  return data.accessToken;
+  inFlightRefresh = (async () => {
+    const refreshToken = getStoredRefreshToken();
+    if (!refreshToken) return null;
+
+    const res = await fetch('/api/auth/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken }),
+    });
+
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      if (res.status === 401 || res.status === 403) {
+        clearAuthSession();
+        if (errBody.code === 'SESSION_EXPIRED_INACTIVITY') {
+          sessionExpiredListener?.('Signed out after 30 days of inactivity.');
+        }
+      }
+      return null;
+    }
+
+    const data = (await res.json()) as {
+      accessToken: string;
+      refreshToken?: string;
+      user: CouplyUser;
+    };
+    saveAuthSession({
+      accessToken: data.accessToken,
+      refreshToken: data.refreshToken,
+      user: data.user,
+    });
+    return data.accessToken;
+  })();
+
+  try {
+    return await inFlightRefresh;
+  } finally {
+    inFlightRefresh = null;
+  }
 }
 
 async function apiFetch<T>(
@@ -153,8 +173,69 @@ export type GoogleSignInResponse = AuthSessionResponse | GoogleProfileCompletion
 export interface TelemetryStats {
   currentlyOnline: number;
   totalActiveUsers: number;
+  totalUsers?: number;
+  verifiedUsers?: number;
+  unverifiedUsers?: number;
+  activeSessionsCount?: number;
+  totalSavedCards?: number;
   windowMinutes: number;
   inactivityLimitDays: number;
+}
+
+export interface AdminUserRecord {
+  id: string;
+  fullName: string;
+  username: string;
+  email: string;
+  partnerName: string;
+  country: string;
+  dateOfBirth: string;
+  genderTheme: GenderTheme;
+  activeDeckTheme: ActiveDeckThemeId;
+  isVerified: boolean;
+  authMethod: string;
+  savedCardsCount: number;
+  onlineNow: boolean;
+  lastSeenAt: string;
+  createdAt: string;
+}
+
+export interface AdminSessionRecord {
+  id: string;
+  userId: string;
+  userEmail: string;
+  userName: string;
+  lastActiveAt: string;
+  expiresAt: string;
+  revoked: boolean;
+  expired: boolean;
+}
+
+export interface AdminOtpRecord {
+  id: string;
+  email: string;
+  purpose: 'signup' | 'login' | 'admin';
+  attempts: number;
+  used: boolean;
+  expiresAt: string;
+  createdAt: string;
+}
+
+export interface AdminOverviewResponse {
+  adminEmail: string;
+  telemetry: TelemetryStats;
+  users: AdminUserRecord[];
+  sessions: AdminSessionRecord[];
+  otpEvents: AdminOtpRecord[];
+  system: {
+    environment: string;
+    databaseMode?: string;
+    gmailSmtpConfigured: boolean;
+    resendConfigured: boolean;
+    googleOAuthConfigured: boolean;
+    passphraseProtected: boolean;
+    serverTime: string;
+  };
 }
 
 export const couplyApi = {
@@ -284,15 +365,47 @@ export const couplyApi = {
     );
   },
 
+  getIous() {
+    return apiFetch<{ ious: CoupleIou[] }>('/api/ious', { auth: true });
+  },
+
+  createIou(payload: {
+    title: string;
+    owedBy: 'me' | 'partner' | 'both';
+    cardId?: string;
+    deckId?: string;
+    deckTitle?: string;
+  }) {
+    return apiFetch<{ iou: CoupleIou }>('/api/ious', {
+      method: 'POST',
+      auth: true,
+      body: JSON.stringify(payload),
+    });
+  },
+
+  toggleIouRedeemed(iouId: string, redeemed: boolean) {
+    return apiFetch<{ iou: CoupleIou }>(
+      `/api/ious/${encodeURIComponent(iouId)}`,
+      {
+        method: 'PATCH',
+        auth: true,
+        body: JSON.stringify({ redeemed }),
+      },
+    );
+  },
+
+  deleteIou(iouId: string) {
+    return apiFetch<{ ok: boolean; id: string }>(
+      `/api/ious/${encodeURIComponent(iouId)}`,
+      { method: 'DELETE', auth: true },
+    );
+  },
+
   sendHeartbeat() {
     return apiFetch<{ ok: boolean; lastSeenAt: string }>('/api/telemetry/heartbeat', {
       method: 'POST',
       auth: true,
     });
-  },
-
-  getTelemetryStats() {
-    return apiFetch<TelemetryStats>('/api/telemetry/stats', { auth: true });
   },
 
   async logout() {
@@ -301,5 +414,71 @@ export const couplyApi = {
     } finally {
       clearAuthSession();
     }
+  },
+};
+
+async function adminFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = getStoredAdminToken();
+  const headers = new Headers(options.headers || {});
+  if (!headers.has('Content-Type') && options.body) {
+    headers.set('Content-Type', 'application/json');
+  }
+  if (token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  const response = await fetch(path, { ...options, headers });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    if (response.status === 401) {
+      clearAdminSession();
+    }
+    throw new ApiError(data.error || 'Admin request failed.', response.status, data.code);
+  }
+  return data as T;
+}
+
+export const adminApi = {
+  getAuthConfig() {
+    return apiFetch<{ requiresPassphrase: boolean }>('/api/admin/auth/config');
+  },
+
+  requestOtp(payload: { email: string; passphrase?: string }) {
+    return apiFetch<{
+      message: string;
+      email: string;
+      cooldownSeconds: number;
+      deliveredVia: 'resend' | 'gmail' | 'preview';
+      devOtpPreview?: string;
+    }>('/api/admin/auth/request-otp', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  },
+
+  async verifyOtp(payload: { email: string; code: string }) {
+    const res = await apiFetch<{ adminToken: string; adminEmail: string; expiresIn: number }>(
+      '/api/admin/auth/verify-otp',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+    );
+    saveAdminSession(res.adminToken, res.adminEmail);
+    return res;
+  },
+
+  getOverview() {
+    return adminFetch<AdminOverviewResponse>('/api/admin/overview');
+  },
+
+  revokeSession(sessionId: string) {
+    return adminFetch<{ ok: boolean; sessionId: string; revoked: boolean }>(
+      `/api/admin/sessions/${encodeURIComponent(sessionId)}/revoke`,
+      { method: 'POST' },
+    );
+  },
+
+  logout() {
+    clearAdminSession();
   },
 };

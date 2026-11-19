@@ -16,10 +16,10 @@ export function escapeHtml(input: string): string {
 }
 
 export function sanitizeHeaderText(input: string): string {
-  return input.replace(/[\r\n]+/g, ' ').trim();
+  return input.replace(/[\r\n\0\u2028\u2029]+/g, ' ').trim();
 }
 
-function renderCouplyEmailShell(params: {
+function renderCouplovaEmailShell(params: {
   headingLine1: string;
   headingLine2: string;
   bodyHtml: string;
@@ -79,10 +79,10 @@ function renderCouplyEmailShell(params: {
               <td style="padding-top:32px;">
                 <div style="height:1px;background-color:#EAE6DF;margin-bottom:20px;"></div>
                 <div style="font-family:Georgia,'Times New Roman',serif;font-style:italic;font-weight:700;font-size:17px;color:#B8AEB0;margin-bottom:6px;">
-                  couply
+                  couplova
                 </div>
                 <p style="margin:0;font-size:12px;line-height:1.5;color:#9A8F92;">
-                  Couply — For Romeo &amp; Juliet couples deepening love beyond Friday dinner dates.
+                  Couplova — For Romeo &amp; Juliet couples deepening love beyond Friday dinner dates.
                 </p>
               </td>
             </tr>
@@ -110,7 +110,7 @@ export function buildConfirmEmailTemplate(params: {
     <p style="margin:0 0 12px;">
       Real intimacy begins long after the five-star Friday dinner bill is paid. Confirm that
       <a href="mailto:${safeEmail}" style="color:#9E472A;text-decoration:underline;">${safeEmail}</a>
-      belongs to you to unlock Couply for you and ${safePartner}.
+      belongs to you to unlock Couplova for you and ${safePartner}.
     </p>
     <p style="margin:0;">
       Tap the button below to confirm right away, or enter your 6-digit code in the app.
@@ -132,10 +132,10 @@ export function buildConfirmEmailTemplate(params: {
   `;
 
   return {
-    subject: sanitizeHeaderText(`Confirm your email address for Couply`),
-    html: renderCouplyEmailShell({
+    subject: sanitizeHeaderText(`Confirm your email address for Couplova`),
+    html: renderCouplovaEmailShell({
       headingLine1: 'Confirm your email address',
-      headingLine2: 'to begin your story on Couply',
+      headingLine2: 'to begin your story on Couplova',
       bodyHtml,
       ctaLabel: 'Confirm Email Address',
       ctaUrl: params.confirmUrl,
@@ -159,17 +159,17 @@ export function buildWelcomeEmailTemplate(params: {
       Welcome, ${safeFirst}. Most nights end with tired small talk across a table or scrolling side by side on the couch.
     </p>
     <p style="margin:0;">
-      Couply is built for the two of you—for Romeo &amp; Juliet nights when the restaurant clears out and you want to ask the questions you never usually say out loud. Put one phone between you and ${safePartner}; all five decks are ready whenever the room gets quiet.
+      Couplova is built for the two of you—for Romeo &amp; Juliet nights when the restaurant clears out and you want to ask the questions you never usually say out loud. Put one phone between you and ${safePartner}; all six moods are ready whenever the room gets quiet.
     </p>
   `;
 
   return {
-    subject: sanitizeHeaderText(`Welcome to Couply — save the small talk for Friday`),
-    html: renderCouplyEmailShell({
+    subject: sanitizeHeaderText(`Welcome to Couplova — save the small talk for Friday`),
+    html: renderCouplovaEmailShell({
       headingLine1: `You and ${params.partnerName || 'your partner'} are in.`,
-      headingLine2: 'One shared phone, five intimate decks.',
+      headingLine2: 'One shared phone, six intimate moods.',
       bodyHtml,
-      ctaLabel: 'Open Couply',
+      ctaLabel: 'Open Couplova',
       ctaUrl: params.appUrl,
       ignoreLine: 'Here is to conversations worth staying up late for.',
     }),
@@ -189,7 +189,7 @@ export function buildLoginOtpEmailTemplate(params: {
 
   const bodyHtml = `
     <p style="margin:0 0 14px;">
-      Someone just entered your password to step back into Couply as
+      Someone just entered your password to step back into Couplova as
       <span style="font-weight:600;color:#1A1113;">${safeEmail}</span>—ready to pick up where you and ${safePartner} left off after dinner.
     </p>
     <p style="margin:0;">
@@ -212,14 +212,60 @@ export function buildLoginOtpEmailTemplate(params: {
   `;
 
   return {
-    subject: sanitizeHeaderText(`Confirm your Couply sign-in`),
-    html: renderCouplyEmailShell({
+    subject: sanitizeHeaderText(`Confirm your Couplova sign-in`),
+    html: renderCouplovaEmailShell({
       headingLine1: "Confirm it's you",
-      headingLine2: 'trying to sign in to Couply',
+      headingLine2: 'trying to sign in to Couplova',
       bodyHtml,
       otpBlockHtml,
       ignoreLine:
         "If you're not trying to log in right now, you can safely ignore this email—your account stays locked without this code.",
+    }),
+  };
+}
+
+export function buildAdminOtpEmailTemplate(params: {
+  email: string;
+  code: string;
+  expiryMinutes?: number;
+}): EmailTemplatePayload {
+  const expiry = params.expiryMinutes ?? OTP_TTL_MINUTES;
+  const safeEmail = escapeHtml(params.email);
+  const safeCode = escapeHtml(params.code);
+
+  const bodyHtml = `
+    <p style="margin:0 0 14px;">
+      An owner sign-in was requested for the Couplova Admin Console under
+      <span style="font-weight:600;color:#1A1113;">${safeEmail}</span>.
+    </p>
+    <p style="margin:0;">
+      Enter this single-use verification code within ${expiry} minutes to open live telemetry and account monitoring:
+    </p>
+  `;
+
+  const otpBlockHtml = `
+    <div style="margin:22px 0 4px;padding:18px 20px;background-color:#FAF8F5;border-radius:10px;">
+      <div style="font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:#7A6B6F;margin-bottom:8px;">
+        Owner Admin Verification Code
+      </div>
+      <div style="font-size:30px;font-weight:700;letter-spacing:0.24em;color:#1A1113;font-variant-numeric:tabular-nums;">
+        ${safeCode}
+      </div>
+      <div style="margin-top:8px;font-size:12px;color:#7A6B6F;">
+        Expires in ${expiry} minutes &middot; Single-use, max 3 attempts
+      </div>
+    </div>
+  `;
+
+  return {
+    subject: sanitizeHeaderText(`Couplova Owner Admin Console Sign-In`),
+    html: renderCouplovaEmailShell({
+      headingLine1: 'Owner Console Sign-In',
+      headingLine2: 'Couplova Telemetry & Audit',
+      bodyHtml,
+      otpBlockHtml,
+      ignoreLine:
+        "If you did not request owner console access, ignore this email immediately.",
     }),
   };
 }
@@ -235,22 +281,22 @@ async function sendViaGmailSmtp(params: {
     return { ok: false };
   }
 
-  try {
-    const transporter = nodemailer.createTransport({
-      host: 'smtp.gmail.com',
-      port: 465,
-      secure: true,
-      auth: {
-        user: gmailUser,
-        pass: gmailAppPassword,
-      },
-      connectionTimeout: 8000,
-      greetingTimeout: 8000,
-      socketTimeout: 10000,
-    });
+  const transporter = nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true,
+    auth: {
+      user: gmailUser,
+      pass: gmailAppPassword,
+    },
+    connectionTimeout: 8000,
+    greetingTimeout: 8000,
+    socketTimeout: 10000,
+  });
 
+  try {
     await transporter.sendMail({
-      from: `Couply <${sanitizeHeaderText(gmailUser)}>`,
+      from: `Couplova <${sanitizeHeaderText(gmailUser)}>`,
       to: sanitizeHeaderText(params.to),
       subject: sanitizeHeaderText(params.subject),
       html: params.html,
@@ -260,8 +306,10 @@ async function sendViaGmailSmtp(params: {
   } catch (err) {
     const errorMessage =
       err instanceof Error ? err.message.slice(0, 180) : 'Gmail SMTP send failed';
-    console.warn('[Couply Email] Gmail SMTP failed:', errorMessage);
+    console.warn('[Couplova Email] Gmail SMTP failed:', errorMessage);
     return { ok: false, errorMessage };
+  } finally {
+    transporter.close();
   }
 }
 
@@ -280,7 +328,7 @@ export async function dispatchTransactionalEmail(params: {
   const hasValidResendKey = Boolean(
     resendKey && resendKey.startsWith('re_') && !resendKey.includes('xxxx'),
   );
-  const fromEmail = process.env.OTP_FROM_EMAIL?.trim() || 'Couply <onboarding@resend.dev>';
+  const fromEmail = process.env.OTP_FROM_EMAIL?.trim() || 'Couplova <onboarding@resend.dev>';
   const isSandboxSender = fromEmail.toLowerCase().includes('onboarding@resend.dev');
   const hasGmailSmtp = Boolean(
     process.env.GMAIL_SMTP_USER?.trim() && process.env.GMAIL_SMTP_APP_PASSWORD?.trim(),
@@ -334,12 +382,12 @@ export async function dispatchTransactionalEmail(params: {
       } catch {
         // Ignore parse failures
       }
-      console.warn('[Couply Email] Resend rejected send:', response.status, providerMessage);
+      console.warn('[Couplova Email] Resend rejected send:', response.status, providerMessage);
       resendFailure = { status: response.status, message: providerMessage };
     } catch (err) {
       const providerMessage =
         err instanceof Error ? err.message.slice(0, 160) : 'Network error reaching Resend';
-      console.warn('[Couply Email] Resend request failed:', providerMessage);
+      console.warn('[Couplova Email] Resend request failed:', providerMessage);
       resendFailure = { status: 502, message: providerMessage };
     }
   }

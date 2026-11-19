@@ -12,21 +12,28 @@ import {
   hashRefreshToken,
   hashSecret,
   signAccessToken,
+  signAdminToken,
   signEmailConfirmToken,
   signGooglePendingToken,
+  timingSafeStringEqual,
   verifyAccessToken,
+  verifyAdminToken,
   verifyEmailConfirmToken,
   verifyGooglePendingToken,
   verifySecret,
 } from './src/services/security';
 import {
+  initDatabase,
+  isExternalDatabaseConfigured,
   loadDatabase,
-  saveDatabase,
+  mutateDatabase,
+  type CouplyDatabase,
   type DbOtpCode,
   type DbSession,
   type DbUser,
 } from './src/services/store';
 import {
+  buildAdminOtpEmailTemplate,
   buildConfirmEmailTemplate,
   buildLoginOtpEmailTemplate,
   buildWelcomeEmailTemplate,
@@ -50,11 +57,26 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 const VALID_CARD_IDS = new Set<string>(
   GAME_DECKS.flatMap((deck) => deck.cards.map((card) => card.id)),
 );
+const VALID_DECK_IDS = new Set<string>(GAME_DECKS.map((deck) => deck.id));
+
+const ADMIN_EMAIL = (process.env.ADMIN_EMAIL?.trim() || 'daveking248@gmail.com').toLowerCase();
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD?.trim() || '';
+
+function sanitizePlainText(input: string, maxLen: number): string {
+  return input
+    .replace(/[\x00-\x1F\x7F\u2028\u2029]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLen);
+}
 
 interface AuthedRequest extends Request {
   auth?: {
     userId: string;
     sessionId: string;
+    email: string;
+  };
+  adminAuth?: {
     email: string;
   };
 }
@@ -236,11 +258,15 @@ async function sendWelcomeEmailForUser(user: DbUser): Promise<void> {
   }).catch(() => {});
 }
 
-function createOtpForEmail(email: string, purpose: 'signup' | 'login'): {
+function createOtpInDb(
+  db: CouplyDatabase,
+  email: string,
+  purpose: 'signup' | 'login' | 'admin',
+): {
   code: string;
   cooldownRemaining: number;
+  hasActiveOtp: boolean;
 } {
-  const db = loadDatabase();
   const normalizedEmail = email.trim().toLowerCase();
   const now = Date.now();
 
@@ -254,6 +280,7 @@ function createOtpForEmail(email: string, purpose: 'signup' | 'login'): {
       return {
         code: '',
         cooldownRemaining: OTP_RESEND_COOLDOWN_SECONDS - elapsedSec,
+        hasActiveOtp: !latestOtp.used && Date.parse(latestOtp.expires_at) > now,
       };
     }
   }
@@ -278,12 +305,10 @@ function createOtpForEmail(email: string, purpose: 'signup' | 'login'): {
   };
 
   db.otp_codes.push(record);
-  saveDatabase(db);
-  return { code, cooldownRemaining: 0 };
+  return { code, cooldownRemaining: 0, hasActiveOtp: true };
 }
 
-function issueSessionForUser(user: DbUser) {
-  const db = loadDatabase();
+function issueSessionInDb(db: CouplyDatabase, user: DbUser) {
   const now = new Date();
   const sessionId = crypto.randomUUID();
   const refreshToken = generateOpaqueRefreshToken();
@@ -306,7 +331,6 @@ function issueSessionForUser(user: DbUser) {
   }
 
   db.sessions.push(session);
-  saveDatabase(db);
 
   const accessToken = signAccessToken(user.id, sessionId, user.email, ACCESS_TOKEN_TTL_SECONDS);
   return {
@@ -317,7 +341,7 @@ function issueSessionForUser(user: DbUser) {
   };
 }
 
-function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
+async function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
   const authHeader = req.headers.authorization;
   if (!authHeader?.startsWith('Bearer ')) {
     res.status(401).json({ error: 'Authentication required.' });
@@ -345,8 +369,10 @@ function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
   }
 
   if (isSessionInactiveExpired(session.last_active_at) || Date.parse(session.expires_at) <= Date.now()) {
-    session.revoked = true;
-    saveDatabase(db);
+    await mutateDatabase((txDb) => {
+      const target = txDb.sessions.find((s) => s.id === payload.sessionId);
+      if (target) target.revoked = true;
+    }).catch(() => {});
     res.status(401).json({
       error: 'Signed out after 30 days of inactivity.',
       code: 'SESSION_EXPIRED_INACTIVITY',
@@ -362,11 +388,40 @@ function requireAuth(req: AuthedRequest, res: Response, next: NextFunction) {
   next();
 }
 
+function requireAdminAuth(req: AuthedRequest, res: Response, next: NextFunction) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith('Bearer ')) {
+    res.status(401).json({ error: 'Owner admin authentication required.' });
+    return;
+  }
+
+  const token = authHeader.slice('Bearer '.length).trim();
+  const payload = verifyAdminToken(token);
+  if (!payload || payload.email.toLowerCase() !== ADMIN_EMAIL) {
+    res.status(401).json({ error: 'Invalid or expired owner admin session.' });
+    return;
+  }
+
+  req.adminAuth = { email: payload.email };
+  next();
+}
+
 async function createApp() {
+  await initDatabase();
+
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
   app.use(express.json({ limit: '32kb' }));
+
+  // Handle malformed JSON bodies cleanly without leaking Express stack traces
+  app.use((err: unknown, _req: Request, res: Response, next: NextFunction) => {
+    if (err && typeof err === 'object' && 'type' in err && (err as { type?: string }).type === 'entity.parse.failed') {
+      res.status(400).json({ error: 'Invalid JSON request payload.' });
+      return;
+    }
+    next(err);
+  });
 
   // Security headers (iframe-compatible for AI Studio preview)
   app.use((req, res, next) => {
@@ -399,12 +454,13 @@ async function createApp() {
 
   app.use('/api', globalApiLimiter);
   app.use('/api/auth', authRateLimiter);
+  app.use('/api/admin/auth', authRateLimiter);
 
   app.get('/api/health', (_req, res) => {
-    res.json({ status: 'ok', service: 'couply-api', timestamp: new Date().toISOString() });
+    res.json({ status: 'ok', service: 'couplova-api', timestamp: new Date().toISOString() });
   });
 
-  // 1. Signup (handles unverified signup abandonment by overwriting unverified records)
+  // 1. Signup (atomic check + OTP cooldown validation before creating/updating unverified record)
   app.post('/api/auth/signup', async (req, res) => {
     const {
       fullName,
@@ -419,7 +475,8 @@ async function createApp() {
       acceptedTerms,
     } = req.body ?? {};
 
-    if (!fullName || typeof fullName !== 'string' || fullName.trim().length < 2 || fullName.trim().length > 80) {
+    const cleanFullName = typeof fullName === 'string' ? sanitizePlainText(fullName, 80) : '';
+    if (cleanFullName.length < 2) {
       res.status(400).json({ error: 'Full Name must be between 2 and 80 characters.' });
       return;
     }
@@ -427,11 +484,12 @@ async function createApp() {
       res.status(400).json({ error: 'Username must be 3–24 letters, numbers, or underscores.' });
       return;
     }
-    if (!partnerName || typeof partnerName !== 'string' || !partnerName.trim() || partnerName.trim().length > 40) {
+    const cleanPartnerName = typeof partnerName === 'string' ? sanitizePlainText(partnerName, 40) : '';
+    if (!cleanPartnerName) {
       res.status(400).json({ error: "Partner's Name is required (max 40 characters)." });
       return;
     }
-    const cleanCountry = typeof country === 'string' ? country.trim().slice(0, 80) : '';
+    const cleanCountry = typeof country === 'string' ? sanitizePlainText(country, 80) : '';
     const cleanDob = typeof dateOfBirth === 'string' ? dateOfBirth.trim() : '';
     if (cleanDob && !isValidDateOfBirth(cleanDob)) {
       res.status(400).json({ error: 'Please enter a valid date of birth (13+).' });
@@ -466,72 +524,90 @@ async function createApp() {
 
     const normalizedEmail = email.trim().toLowerCase();
     const normalizedUsername = username.trim().toLowerCase();
-    const db = loadDatabase();
 
-    const existingVerifiedEmail = db.users.find(
-      (u) => u.email === normalizedEmail && u.is_verified,
-    );
-    if (existingVerifiedEmail) {
-      res.status(409).json({
-        error: 'An account with this email already exists. Log in instead.',
-        code: 'EMAIL_ALREADY_EXISTS',
-      });
-      return;
-    }
+    const signupTx = await mutateDatabase<{
+      status: number;
+      error?: string;
+      code?: string;
+      retryAfterSeconds?: number;
+      user?: DbUser;
+      otpCode?: string;
+    }>((db) => {
+      const existingVerifiedEmail = db.users.find(
+        (u) => u.email === normalizedEmail && u.is_verified,
+      );
+      if (existingVerifiedEmail) {
+        return {
+          status: 409,
+          error: 'An account with this email already exists. Log in instead.',
+          code: 'EMAIL_ALREADY_EXISTS',
+        };
+      }
 
-    const existingVerifiedUsername = db.users.find(
-      (u) => u.username.toLowerCase() === normalizedUsername && u.is_verified,
-    );
-    if (existingVerifiedUsername) {
-      res.status(409).json({
-        error: 'That username is already taken.',
-        code: 'USERNAME_TAKEN',
-      });
-      return;
-    }
+      const existingVerifiedUsername = db.users.find(
+        (u) => u.username.toLowerCase() === normalizedUsername && u.is_verified,
+      );
+      if (existingVerifiedUsername) {
+        return {
+          status: 409,
+          error: 'That username is already taken.',
+          code: 'USERNAME_TAKEN',
+        };
+      }
 
-    // Overwrite any unverified abandoned signup matching email or username
-    db.users = db.users.filter(
-      (u) =>
-        u.is_verified ||
-        (u.email !== normalizedEmail && u.username.toLowerCase() !== normalizedUsername),
-    );
+      // Enforce OTP resend cooldown BEFORE mutating any user record
+      const otpResult = createOtpInDb(db, normalizedEmail, 'signup');
+      if (otpResult.cooldownRemaining > 0) {
+        return {
+          status: 429,
+          error: `Please wait ${otpResult.cooldownRemaining}s before requesting another code.`,
+          retryAfterSeconds: otpResult.cooldownRemaining,
+        };
+      }
 
-    const now = new Date().toISOString();
-    const newUser: DbUser = {
-      id: crypto.randomUUID(),
-      full_name: fullName.trim(),
-      username: username.trim(),
-      email: normalizedEmail,
-      country: cleanCountry,
-      date_of_birth: cleanDob,
-      partner_name: partnerName.trim(),
-      password_hash: hashSecret(password),
-      google_sub: null,
-      gender_theme: genderTheme as GenderTheme,
-      active_deck_theme: 'default',
-      is_verified: false,
-      last_seen_at: now,
-      created_at: now,
-    };
+      // Overwrite any unverified abandoned signup matching email or username
+      db.users = db.users.filter(
+        (u) =>
+          u.is_verified ||
+          (u.email !== normalizedEmail && u.username.toLowerCase() !== normalizedUsername),
+      );
 
-    db.users.push(newUser);
-    saveDatabase(db);
+      const now = new Date().toISOString();
+      const newUser: DbUser = {
+        id: crypto.randomUUID(),
+        full_name: cleanFullName,
+        username: username.trim(),
+        email: normalizedEmail,
+        country: cleanCountry,
+        date_of_birth: cleanDob,
+        partner_name: cleanPartnerName,
+        password_hash: hashSecret(password),
+        google_sub: null,
+        gender_theme: genderTheme as GenderTheme,
+        active_deck_theme: 'default',
+        is_verified: false,
+        last_seen_at: now,
+        created_at: now,
+      };
 
-    const otpResult = createOtpForEmail(normalizedEmail, 'signup');
-    if (otpResult.cooldownRemaining > 0) {
-      res.status(429).json({
-        error: `Please wait ${otpResult.cooldownRemaining}s before requesting another code.`,
-        retryAfterSeconds: otpResult.cooldownRemaining,
+      db.users.push(newUser);
+      return { status: 201, user: newUser, otpCode: otpResult.code };
+    });
+
+    if (signupTx.status !== 201 || !signupTx.user || !signupTx.otpCode) {
+      res.status(signupTx.status).json({
+        error: signupTx.error,
+        ...(signupTx.code ? { code: signupTx.code } : {}),
+        ...(signupTx.retryAfterSeconds ? { retryAfterSeconds: signupTx.retryAfterSeconds } : {}),
       });
       return;
     }
 
     const delivery = await sendOtpEmail({
-      userId: newUser.id,
+      userId: signupTx.user.id,
       email: normalizedEmail,
-      partnerName: newUser.partner_name,
-      code: otpResult.code,
+      partnerName: signupTx.user.partner_name,
+      code: signupTx.otpCode,
       purpose: 'signup',
     });
 
@@ -603,22 +679,60 @@ async function createApp() {
 
     clearFailedLoginAttempts(normalizedEmail);
 
-    const purpose = user.is_verified ? 'login' : 'signup';
-    const otpResult = createOtpForEmail(normalizedEmail, purpose);
-    if (otpResult.cooldownRemaining > 0) {
+    const otpTx = await mutateDatabase<{
+      purpose: 'signup' | 'login';
+      code: string;
+      cooldownRemaining: number;
+      hasActiveOtp: boolean;
+      targetUser: DbUser | null;
+    }>((txDb) => {
+      const targetUser = txDb.users.find((u) => u.email === normalizedEmail) || null;
+      const purpose: 'signup' | 'login' = targetUser?.is_verified ? 'login' : 'signup';
+      if (!targetUser) {
+        return { purpose, code: '', cooldownRemaining: 0, hasActiveOtp: false, targetUser: null };
+      }
+      const otpResult = createOtpInDb(txDb, normalizedEmail, purpose);
+      return {
+        purpose,
+        code: otpResult.code,
+        cooldownRemaining: otpResult.cooldownRemaining,
+        hasActiveOtp: otpResult.hasActiveOtp,
+        targetUser,
+      };
+    });
+
+    if (!otpTx.targetUser) {
+      res.status(404).json({
+        error: "No account found for that email. Let's get you signed up.",
+        code: 'USER_NOT_FOUND',
+      });
+      return;
+    }
+
+    if (otpTx.cooldownRemaining > 0) {
+      if (otpTx.hasActiveOtp) {
+        res.json({
+          message: 'A 6-digit code was already sent to your email. Enter it below.',
+          email: normalizedEmail,
+          purpose: otpTx.purpose,
+          cooldownSeconds: otpTx.cooldownRemaining,
+          deliveredVia: 'preview',
+        });
+        return;
+      }
       res.status(429).json({
-        error: `Please wait ${otpResult.cooldownRemaining}s before requesting another code.`,
-        retryAfterSeconds: otpResult.cooldownRemaining,
+        error: `Please wait ${otpTx.cooldownRemaining}s before requesting another code.`,
+        retryAfterSeconds: otpTx.cooldownRemaining,
       });
       return;
     }
 
     const delivery = await sendOtpEmail({
-      userId: user.id,
+      userId: otpTx.targetUser.id,
       email: normalizedEmail,
-      partnerName: user.partner_name,
-      code: otpResult.code,
-      purpose,
+      partnerName: otpTx.targetUser.partner_name,
+      code: otpTx.code,
+      purpose: otpTx.purpose,
     });
 
     if (delivery.providerFailed) {
@@ -633,7 +747,7 @@ async function createApp() {
     res.json({
       message: 'Enter the 6-digit verification code sent to your email.',
       email: normalizedEmail,
-      purpose,
+      purpose: otpTx.purpose,
       cooldownSeconds: OTP_RESEND_COOLDOWN_SECONDS,
       deliveredVia: delivery.deliveredVia,
       ...(delivery.devOtpPreview ? { devOtpPreview: delivery.devOtpPreview } : {}),
@@ -649,30 +763,48 @@ async function createApp() {
     }
 
     const normalizedEmail = email.trim().toLowerCase();
-    const db = loadDatabase();
-    const user = db.users.find((u) => u.email === normalizedEmail);
-    if (!user) {
+    const tx = await mutateDatabase<{
+      found: boolean;
+      resolvedPurpose: 'signup' | 'login';
+      user?: DbUser;
+      code: string;
+      cooldownRemaining: number;
+    }>((db) => {
+      const user = db.users.find((u) => u.email === normalizedEmail);
+      if (!user) {
+        return { found: false, resolvedPurpose: 'login', code: '', cooldownRemaining: 0 };
+      }
+      const resolvedPurpose: 'signup' | 'login' =
+        !user.is_verified || purpose === 'signup' ? 'signup' : 'login';
+      const otpResult = createOtpInDb(db, normalizedEmail, resolvedPurpose);
+      return {
+        found: true,
+        resolvedPurpose,
+        user,
+        code: otpResult.code,
+        cooldownRemaining: otpResult.cooldownRemaining,
+      };
+    });
+
+    if (!tx.found || !tx.user) {
       res.status(404).json({ error: 'Account not found.' });
       return;
     }
 
-    const resolvedPurpose: 'signup' | 'login' =
-      !user.is_verified || purpose === 'signup' ? 'signup' : 'login';
-    const otpResult = createOtpForEmail(normalizedEmail, resolvedPurpose);
-    if (otpResult.cooldownRemaining > 0) {
+    if (tx.cooldownRemaining > 0) {
       res.status(429).json({
-        error: `Wait ${otpResult.cooldownRemaining}s before resending.`,
-        retryAfterSeconds: otpResult.cooldownRemaining,
+        error: `Wait ${tx.cooldownRemaining}s before resending.`,
+        retryAfterSeconds: tx.cooldownRemaining,
       });
       return;
     }
 
     const delivery = await sendOtpEmail({
-      userId: user.id,
+      userId: tx.user.id,
       email: normalizedEmail,
-      partnerName: user.partner_name,
-      code: otpResult.code,
-      purpose: resolvedPurpose,
+      partnerName: tx.user.partner_name,
+      code: tx.code,
+      purpose: tx.resolvedPurpose,
     });
 
     if (delivery.providerFailed) {
@@ -692,11 +824,16 @@ async function createApp() {
     });
   });
 
-  // 4. Verify OTP (max 3 attempts, 10-min expiry, purpose-bound)
+  // 4. Verify OTP (max 3 attempts, 10-min expiry, strict purpose-binding, atomic transaction)
   app.post('/api/auth/verify-otp', async (req, res) => {
     const { email, code, purpose } = req.body ?? {};
     if (!email || typeof email !== 'string' || !isValidEmail(email) || !code || typeof code !== 'string') {
       res.status(400).json({ error: 'Valid email and 6-digit code are required.' });
+      return;
+    }
+
+    if (purpose !== undefined && purpose !== 'signup' && purpose !== 'login') {
+      res.status(400).json({ error: 'Invalid verification purpose.' });
       return;
     }
 
@@ -707,78 +844,89 @@ async function createApp() {
       return;
     }
 
-    const db = loadDatabase();
-    const expectedPurpose: 'signup' | 'login' | null =
-      purpose === 'signup' || purpose === 'login' ? purpose : null;
+    const result = await mutateDatabase<{
+      status: number;
+      error?: string;
+      sessionBundle?: ReturnType<typeof issueSessionInDb>;
+      sendWelcome?: DbUser;
+    }>((db) => {
+      const user = db.users.find((u) => u.email === normalizedEmail);
+      if (!user) {
+        return { status: 404, error: 'User account not found.' };
+      }
 
-    const otpRecord = [...db.otp_codes]
-      .filter(
-        (o) =>
-          o.email === normalizedEmail &&
-          !o.used &&
-          (!expectedPurpose || o.purpose === expectedPurpose),
-      )
-      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];
+      const expectedPurpose: 'signup' | 'login' =
+        purpose === 'signup' || purpose === 'login'
+          ? purpose
+          : user.is_verified
+            ? 'login'
+            : 'signup';
 
-    if (!otpRecord) {
-      res.status(400).json({ error: 'No active verification code found. Request a new code.' });
-      return;
-    }
+      const otpRecord = [...db.otp_codes]
+        .filter(
+          (o) =>
+            o.email === normalizedEmail &&
+            !o.used &&
+            o.purpose === expectedPurpose,
+        )
+        .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];
 
-    if (Date.parse(otpRecord.expires_at) <= Date.now()) {
-      otpRecord.used = true;
-      saveDatabase(db);
-      res.status(400).json({ error: 'Verification code expired. Please resend a new code.' });
-      return;
-    }
+      if (!otpRecord) {
+        return { status: 400, error: 'No active verification code found. Request a new code.' };
+      }
 
-    if (otpRecord.attempts >= MAX_OTP_ATTEMPTS) {
-      otpRecord.used = true;
-      saveDatabase(db);
-      res.status(429).json({ error: 'Maximum attempts reached. Request a new code.' });
-      return;
-    }
+      if (Date.parse(otpRecord.expires_at) <= Date.now()) {
+        otpRecord.used = true;
+        return { status: 400, error: 'Verification code expired. Please resend a new code.' };
+      }
 
-    const isMatch = verifySecret(cleanedCode, otpRecord.code_hash);
-    if (!isMatch) {
-      otpRecord.attempts += 1;
       if (otpRecord.attempts >= MAX_OTP_ATTEMPTS) {
         otpRecord.used = true;
+        return { status: 429, error: 'Maximum attempts reached. Request a new code.' };
       }
-      saveDatabase(db);
-      const remaining = Math.max(0, MAX_OTP_ATTEMPTS - otpRecord.attempts);
-      res.status(400).json({
-        error:
-          remaining > 0
-            ? `Incorrect code. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
-            : 'Code invalidated after 3 failed attempts. Please request a new code.',
-      });
+
+      if (!verifySecret(cleanedCode, otpRecord.code_hash)) {
+        otpRecord.attempts += 1;
+        if (otpRecord.attempts >= MAX_OTP_ATTEMPTS) {
+          otpRecord.used = true;
+        }
+        const remaining = Math.max(0, MAX_OTP_ATTEMPTS - otpRecord.attempts);
+        return {
+          status: 400,
+          error:
+            remaining > 0
+              ? `Incorrect code. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
+              : 'Code invalidated after 3 failed attempts. Please request a new code.',
+        };
+      }
+
+      otpRecord.used = true;
+      const wasVerified = user.is_verified;
+      user.is_verified = true;
+      user.last_seen_at = new Date().toISOString();
+
+      const sessionBundle = issueSessionInDb(db, user);
+      return {
+        status: 200,
+        sessionBundle,
+        sendWelcome: !wasVerified && otpRecord.purpose === 'signup' ? { ...user } : undefined,
+      };
+    });
+
+    if (result.status !== 200 || !result.sessionBundle) {
+      res.status(result.status).json({ error: result.error || 'Verification failed.' });
       return;
     }
 
-    otpRecord.used = true;
-    const user = db.users.find((u) => u.email === normalizedEmail);
-    if (!user) {
-      saveDatabase(db);
-      res.status(404).json({ error: 'User account not found.' });
-      return;
+    if (result.sendWelcome) {
+      void sendWelcomeEmailForUser(result.sendWelcome);
     }
 
-    const wasVerified = user.is_verified;
-    user.is_verified = true;
-    user.last_seen_at = new Date().toISOString();
-    saveDatabase(db);
-
-    if (!wasVerified && otpRecord.purpose === 'signup') {
-      void sendWelcomeEmailForUser(user);
-    }
-
-    const sessionBundle = issueSessionForUser(user);
-    res.json(sessionBundle);
+    res.json(result.sessionBundle);
   });
 
-  // 4b. Confirm Email via Magic Button Link (10-min expiry, single-use jti)
-  app.post('/api/auth/confirm-email-link', (req, res) => {
+  // 4b. Confirm Email via Magic Button Link (10-min expiry, single-use jti, atomic transaction)
+  app.post('/api/auth/confirm-email-link', async (req, res) => {
     const { token } = req.body ?? {};
     if (!token || typeof token !== 'string') {
       res.status(400).json({ error: 'Confirmation token is required.' });
@@ -791,41 +939,55 @@ async function createApp() {
       return;
     }
 
-    const db = loadDatabase();
-    const alreadyUsed = db.used_confirm_jtis.some((entry) => entry.jti === payload.jti);
-    if (alreadyUsed) {
-      res.status(401).json({ error: 'This confirmation link has already been used.' });
-      return;
-    }
+    const result = await mutateDatabase<{
+      status: number;
+      error?: string;
+      sessionBundle?: ReturnType<typeof issueSessionInDb>;
+      sendWelcome?: DbUser;
+    }>((db) => {
+      const alreadyUsed = db.used_confirm_jtis.some((entry) => entry.jti === payload.jti);
+      if (alreadyUsed) {
+        return { status: 401, error: 'This confirmation link has already been used.' };
+      }
 
-    const user = db.users.find((u) => u.id === payload.sub && u.email === payload.email);
-    if (!user) {
-      res.status(404).json({ error: 'User account not found.' });
-      return;
-    }
+      const user = db.users.find((u) => u.id === payload.sub && u.email === payload.email);
+      if (!user) {
+        return { status: 404, error: 'User account not found.' };
+      }
 
-    db.used_confirm_jtis.push({
-      jti: payload.jti,
-      expires_at: new Date(payload.exp * 1000).toISOString(),
+      db.used_confirm_jtis.push({
+        jti: payload.jti,
+        expires_at: new Date(payload.exp * 1000).toISOString(),
+      });
+
+      for (const otp of db.otp_codes) {
+        if (otp.email === user.email && !otp.used) {
+          otp.used = true;
+        }
+      }
+
+      const wasVerified = user.is_verified;
+      user.is_verified = true;
+      user.last_seen_at = new Date().toISOString();
+
+      const sessionBundle = issueSessionInDb(db, user);
+      return {
+        status: 200,
+        sessionBundle,
+        sendWelcome: !wasVerified ? { ...user } : undefined,
+      };
     });
 
-    for (const otp of db.otp_codes) {
-      if (otp.email === user.email && !otp.used) {
-        otp.used = true;
-      }
+    if (result.status !== 200 || !result.sessionBundle) {
+      res.status(result.status).json({ error: result.error || 'Confirmation failed.' });
+      return;
     }
 
-    const wasVerified = user.is_verified;
-    user.is_verified = true;
-    user.last_seen_at = new Date().toISOString();
-    saveDatabase(db);
-
-    if (!wasVerified) {
-      void sendWelcomeEmailForUser(user);
+    if (result.sendWelcome) {
+      void sendWelcomeEmailForUser(result.sendWelcome);
     }
 
-    const sessionBundle = issueSessionForUser(user);
-    res.json(sessionBundle);
+    res.json(result.sessionBundle);
   });
 
   // 5. Google Sign-In Verification, Auto-Linking & New User Profile Completion Prompt
@@ -878,28 +1040,36 @@ async function createApp() {
       }
 
       const normalizedEmail = tokenInfo.email.toLowerCase();
-      const db = loadDatabase();
-      const existingUser = db.users.find(
-        (u) => u.google_sub === tokenInfo.sub || u.email === normalizedEmail,
-      );
-
-      if (existingUser) {
+      const tx = await mutateDatabase<{
+        sessionBundle?: ReturnType<typeof issueSessionInDb>;
+        sendWelcome?: DbUser;
+      }>((db) => {
+        const existingUser = db.users.find(
+          (u) => u.google_sub === tokenInfo.sub || u.email === normalizedEmail,
+        );
+        if (!existingUser) return {};
         const wasVerified = existingUser.is_verified;
-        existingUser.google_sub = tokenInfo.sub;
+        existingUser.google_sub = tokenInfo.sub!;
         existingUser.is_verified = true;
         existingUser.last_seen_at = new Date().toISOString();
-        saveDatabase(db);
-        if (!wasVerified) {
-          void sendWelcomeEmailForUser(existingUser);
+        const sessionBundle = issueSessionInDb(db, existingUser);
+        return {
+          sessionBundle,
+          sendWelcome: !wasVerified ? { ...existingUser } : undefined,
+        };
+      });
+
+      if (tx.sessionBundle) {
+        if (tx.sendWelcome) {
+          void sendWelcomeEmailForUser(tx.sendWelcome);
         }
-        const sessionBundle = issueSessionForUser(existingUser);
-        res.json(sessionBundle);
+        res.json(tx.sessionBundle);
         return;
       }
 
       // New Google user -> prompt for chosen username, partner's name & theme
       const fullName =
-        tokenInfo.name?.trim().slice(0, 80) ||
+        sanitizePlainText(tokenInfo.name || '', 80) ||
         normalizedEmail.split('@')[0].replace(/[^a-zA-Z0-9 ]/g, ' ');
       const pendingToken = signGooglePendingToken(tokenInfo.sub, normalizedEmail, fullName);
       res.json({
@@ -916,7 +1086,7 @@ async function createApp() {
   });
 
   // 5b. Complete Google Sign-Up (Username, Partner's Name, Optional DOB, Gender Theme, T&C)
-  app.post('/api/auth/google/complete', (req, res) => {
+  app.post('/api/auth/google/complete', async (req, res) => {
     const {
       pendingToken,
       username,
@@ -942,7 +1112,8 @@ async function createApp() {
       res.status(400).json({ error: 'Username must be 3–24 letters, numbers, or underscores.' });
       return;
     }
-    if (!partnerName || typeof partnerName !== 'string' || !partnerName.trim() || partnerName.trim().length > 40) {
+    const cleanPartnerName = typeof partnerName === 'string' ? sanitizePlainText(partnerName, 40) : '';
+    if (!cleanPartnerName) {
       res.status(400).json({ error: "Please enter your partner's name (max 40 characters)." });
       return;
     }
@@ -960,78 +1131,98 @@ async function createApp() {
       return;
     }
 
-    const db = loadDatabase();
     const normalizedEmail = googleData.email.toLowerCase();
     const normalizedUsername = username.trim().toLowerCase();
+    const cleanCountry = typeof country === 'string' ? sanitizePlainText(country, 80) : '';
 
-    const emailExists = db.users.find((u) => u.email === normalizedEmail && u.is_verified);
-    if (emailExists) {
-      res.status(409).json({
-        error: 'An account with this email already exists. Log in instead.',
-        code: 'EMAIL_ALREADY_EXISTS',
+    const result = await mutateDatabase<{
+      status: number;
+      error?: string;
+      code?: string;
+      sessionBundle?: ReturnType<typeof issueSessionInDb>;
+      newUser?: DbUser;
+    }>((db) => {
+      const emailExists = db.users.find((u) => u.email === normalizedEmail && u.is_verified);
+      if (emailExists) {
+        return {
+          status: 409,
+          error: 'An account with this email already exists. Log in instead.',
+          code: 'EMAIL_ALREADY_EXISTS',
+        };
+      }
+
+      const usernameExists = db.users.find(
+        (u) => u.username.toLowerCase() === normalizedUsername && u.is_verified,
+      );
+      if (usernameExists) {
+        return {
+          status: 409,
+          error: 'That username is already taken. Choose another one.',
+          code: 'USERNAME_TAKEN',
+        };
+      }
+
+      // Overwrite any unverified abandoned record if one existed
+      db.users = db.users.filter(
+        (u) =>
+          u.is_verified ||
+          (u.email !== normalizedEmail && u.username.toLowerCase() !== normalizedUsername),
+      );
+
+      const now = new Date().toISOString();
+      const newUser: DbUser = {
+        id: crypto.randomUUID(),
+        full_name: sanitizePlainText(googleData.fullName, 80) || 'Couplova User',
+        username: username.trim(),
+        email: normalizedEmail,
+        country: cleanCountry,
+        date_of_birth: cleanDob,
+        partner_name: cleanPartnerName,
+        password_hash: null,
+        google_sub: googleData.googleSub,
+        gender_theme: genderTheme as GenderTheme,
+        active_deck_theme: 'default',
+        is_verified: true,
+        last_seen_at: now,
+        created_at: now,
+      };
+
+      db.users.push(newUser);
+      const sessionBundle = issueSessionInDb(db, newUser);
+      return { status: 201, sessionBundle, newUser };
+    });
+
+    if (result.status !== 201 || !result.sessionBundle || !result.newUser) {
+      res.status(result.status).json({
+        error: result.error,
+        ...(result.code ? { code: result.code } : {}),
       });
       return;
     }
 
-    const usernameExists = db.users.find(
-      (u) => u.username.toLowerCase() === normalizedUsername && u.is_verified,
-    );
-    if (usernameExists) {
-      res.status(409).json({
-        error: 'That username is already taken. Choose another one.',
-        code: 'USERNAME_TAKEN',
-      });
-      return;
-    }
-
-    // Overwrite any unverified abandoned record if one existed
-    db.users = db.users.filter(
-      (u) =>
-        u.is_verified ||
-        (u.email !== normalizedEmail && u.username.toLowerCase() !== normalizedUsername),
-    );
-
-    const now = new Date().toISOString();
-    const newUser: DbUser = {
-      id: crypto.randomUUID(),
-      full_name: googleData.fullName,
-      username: username.trim(),
-      email: normalizedEmail,
-      country: typeof country === 'string' ? country.trim().slice(0, 80) : '',
-      date_of_birth: cleanDob,
-      partner_name: partnerName.trim(),
-      password_hash: null,
-      google_sub: googleData.googleSub,
-      gender_theme: genderTheme as GenderTheme,
-      active_deck_theme: 'default',
-      is_verified: true,
-      last_seen_at: now,
-      created_at: now,
-    };
-
-    db.users.push(newUser);
-    saveDatabase(db);
-
-    void sendWelcomeEmailForUser(newUser);
-
-    const sessionBundle = issueSessionForUser(newUser);
-    res.status(201).json(sessionBundle);
+    void sendWelcomeEmailForUser(result.newUser);
+    res.status(201).json(result.sessionBundle);
   });
 
   // 6. Demo Couple Session (for immediate preview & ?autostart=1 verification)
-  app.post('/api/auth/demo', (_req, res) => {
-    const db = loadDatabase();
-    const demoUser = db.users.find((u) => u.email === 'maya@couply.app') || db.users[0];
-    if (!demoUser) {
+  app.post('/api/auth/demo', async (_req, res) => {
+    const sessionBundle = await mutateDatabase((db) => {
+      const demoUser =
+        db.users.find((u) => u.email === 'maya@couplova.app' || u.email === 'maya@couply.app') ||
+        db.users[0];
+      if (!demoUser) return null;
+      return issueSessionInDb(db, demoUser);
+    });
+
+    if (!sessionBundle) {
       res.status(404).json({ error: 'Demo user unavailable.' });
       return;
     }
-    const sessionBundle = issueSessionForUser(demoUser);
     res.json(sessionBundle);
   });
 
-  // 7. Refresh Token with Rotation, Reuse Detection & 30-Day Inactivity Revocation
-  app.post('/api/auth/refresh', (req, res) => {
+  // 7. Refresh Token with Atomic Rotation, Reuse Detection & 30-Day Inactivity Revocation
+  app.post('/api/auth/refresh', async (req, res) => {
     const { refreshToken } = req.body ?? {};
     if (!refreshToken || typeof refreshToken !== 'string') {
       res.status(400).json({ error: 'Refresh token required.' });
@@ -1039,80 +1230,98 @@ async function createApp() {
     }
 
     const tokenHash = hashRefreshToken(refreshToken);
-    const db = loadDatabase();
 
-    // Reuse detection: if an already-rotated refresh token is replayed, revoke all user sessions
-    const reused = db.rotated_refresh_hashes.find((entry) => entry.token_hash === tokenHash);
-    if (reused) {
-      for (const s of db.sessions) {
-        if (s.user_id === reused.user_id) {
-          s.revoked = true;
+    const result = await mutateDatabase<{
+      status: number;
+      error?: string;
+      code?: string;
+      body?: {
+        accessToken: string;
+        refreshToken: string;
+        expiresIn: number;
+        user: ReturnType<typeof sanitizeUser>;
+      };
+    }>((db) => {
+      // Reuse detection: if an already-rotated refresh token is replayed, revoke all user sessions
+      const reused = db.rotated_refresh_hashes.find((entry) => entry.token_hash === tokenHash);
+      if (reused) {
+        for (const s of db.sessions) {
+          if (s.user_id === reused.user_id) {
+            s.revoked = true;
+          }
         }
+        return {
+          status: 401,
+          error: 'Session invalidated for your security. Please log in again.',
+          code: 'REFRESH_TOKEN_REUSE_DETECTED',
+        };
       }
-      saveDatabase(db);
-      res.status(401).json({
-        error: 'Session invalidated for your security. Please log in again.',
-        code: 'REFRESH_TOKEN_REUSE_DETECTED',
+
+      const session = db.sessions.find((s) => s.refresh_token_hash === tokenHash);
+      if (!session || session.revoked) {
+        return { status: 401, error: 'Session is invalid or revoked.' };
+      }
+
+      if (
+        isSessionInactiveExpired(session.last_active_at) ||
+        Date.parse(session.expires_at) <= Date.now()
+      ) {
+        session.revoked = true;
+        return {
+          status: 401,
+          error: 'Signed out after 30 days of inactivity.',
+          code: 'SESSION_EXPIRED_INACTIVITY',
+        };
+      }
+
+      const user = db.users.find((u) => u.id === session.user_id);
+      if (!user || !user.is_verified) {
+        return { status: 401, error: 'User not found or unverified.' };
+      }
+
+      // Rotate refresh token on every refresh
+      const nextRefreshToken = generateOpaqueRefreshToken();
+      db.rotated_refresh_hashes.push({
+        token_hash: tokenHash,
+        user_id: user.id,
+        expires_at: session.expires_at,
+      });
+      session.refresh_token_hash = hashRefreshToken(nextRefreshToken);
+
+      const nowIso = new Date().toISOString();
+      session.last_active_at = nowIso;
+      user.last_seen_at = nowIso;
+
+      const accessToken = signAccessToken(user.id, session.id, user.email, ACCESS_TOKEN_TTL_SECONDS);
+      return {
+        status: 200,
+        body: {
+          accessToken,
+          refreshToken: nextRefreshToken,
+          expiresIn: ACCESS_TOKEN_TTL_SECONDS,
+          user: sanitizeUser(user),
+        },
+      };
+    });
+
+    if (result.status !== 200 || !result.body) {
+      res.status(result.status).json({
+        error: result.error || 'Unable to refresh session.',
+        ...(result.code ? { code: result.code } : {}),
       });
       return;
     }
-
-    const session = db.sessions.find((s) => s.refresh_token_hash === tokenHash);
-    if (!session || session.revoked) {
-      res.status(401).json({ error: 'Session is invalid or revoked.' });
-      return;
-    }
-
-    if (
-      isSessionInactiveExpired(session.last_active_at) ||
-      Date.parse(session.expires_at) <= Date.now()
-    ) {
-      session.revoked = true;
-      saveDatabase(db);
-      res.status(401).json({
-        error: 'Signed out after 30 days of inactivity.',
-        code: 'SESSION_EXPIRED_INACTIVITY',
-      });
-      return;
-    }
-
-    const user = db.users.find((u) => u.id === session.user_id);
-    if (!user || !user.is_verified) {
-      res.status(401).json({ error: 'User not found or unverified.' });
-      return;
-    }
-
-    // Rotate refresh token on every refresh
-    const nextRefreshToken = generateOpaqueRefreshToken();
-    db.rotated_refresh_hashes.push({
-      token_hash: tokenHash,
-      user_id: user.id,
-      expires_at: session.expires_at,
-    });
-    session.refresh_token_hash = hashRefreshToken(nextRefreshToken);
-
-    const nowIso = new Date().toISOString();
-    session.last_active_at = nowIso;
-    user.last_seen_at = nowIso;
-    saveDatabase(db);
-
-    const accessToken = signAccessToken(user.id, session.id, user.email, ACCESS_TOKEN_TTL_SECONDS);
-    res.json({
-      accessToken,
-      refreshToken: nextRefreshToken,
-      expiresIn: ACCESS_TOKEN_TTL_SECONDS,
-      user: sanitizeUser(user),
-    });
+    res.json(result.body);
   });
 
   // 8. Logout
-  app.post('/api/auth/logout', requireAuth, (req: AuthedRequest, res) => {
-    const db = loadDatabase();
-    const session = db.sessions.find((s) => s.id === req.auth?.sessionId);
-    if (session) {
-      session.revoked = true;
-      saveDatabase(db);
-    }
+  app.post('/api/auth/logout', requireAuth, async (req: AuthedRequest, res) => {
+    await mutateDatabase((db) => {
+      const session = db.sessions.find((s) => s.id === req.auth?.sessionId);
+      if (session) {
+        session.revoked = true;
+      }
+    });
     res.json({ ok: true });
   });
 
@@ -1127,7 +1336,7 @@ async function createApp() {
     res.json({ user: sanitizeUser(user) });
   });
 
-  app.patch('/api/me', requireAuth, (req: AuthedRequest, res) => {
+  app.patch('/api/me', requireAuth, async (req: AuthedRequest, res) => {
     const { activeDeckTheme, partnerName } = req.body ?? {};
     const allowedThemes: ActiveDeckThemeId[] = [
       'default',
@@ -1139,22 +1348,27 @@ async function createApp() {
       'male',
     ];
 
-    const db = loadDatabase();
-    const user = db.users.find((u) => u.id === req.auth?.userId);
-    if (!user) {
+    const updated = await mutateDatabase((db) => {
+      const user = db.users.find((u) => u.id === req.auth?.userId);
+      if (!user) return null;
+
+      if (typeof activeDeckTheme === 'string' && allowedThemes.includes(activeDeckTheme as ActiveDeckThemeId)) {
+        user.active_deck_theme = activeDeckTheme as ActiveDeckThemeId;
+      }
+      if (typeof partnerName === 'string') {
+        const clean = sanitizePlainText(partnerName, 40);
+        if (clean) {
+          user.partner_name = clean;
+        }
+      }
+      return sanitizeUser(user);
+    });
+
+    if (!updated) {
       res.status(404).json({ error: 'User not found.' });
       return;
     }
-
-    if (typeof activeDeckTheme === 'string' && allowedThemes.includes(activeDeckTheme as ActiveDeckThemeId)) {
-      user.active_deck_theme = activeDeckTheme as ActiveDeckThemeId;
-    }
-    if (typeof partnerName === 'string' && partnerName.trim()) {
-      user.partner_name = partnerName.trim().slice(0, 32);
-    }
-
-    saveDatabase(db);
-    res.json({ user: sanitizeUser(user) });
+    res.json({ user: updated });
   });
 
   // 10. Saved Cards CRUD (validated against real deck card IDs)
@@ -1166,58 +1380,174 @@ async function createApp() {
     res.json({ savedCards: saved });
   });
 
-  app.post('/api/saved-cards/:cardId', requireAuth, (req: AuthedRequest, res) => {
+  app.post('/api/saved-cards/:cardId', requireAuth, async (req: AuthedRequest, res) => {
     const cardId = String(req.params.cardId || '').trim();
     if (!cardId || !VALID_CARD_IDS.has(cardId)) {
       res.status(400).json({ error: 'Invalid card ID.' });
       return;
     }
-    const db = loadDatabase();
-    const exists = db.saved_cards.some(
-      (c) => c.user_id === req.auth?.userId && c.card_id === cardId,
-    );
-    if (!exists && req.auth?.userId) {
-      db.saved_cards.push({
-        user_id: req.auth.userId,
-        card_id: cardId,
-        created_at: new Date().toISOString(),
-      });
-      saveDatabase(db);
-    }
+
+    await mutateDatabase((db) => {
+      const exists = db.saved_cards.some(
+        (c) => c.user_id === req.auth?.userId && c.card_id === cardId,
+      );
+      if (!exists && req.auth?.userId) {
+        db.saved_cards.push({
+          user_id: req.auth.userId,
+          card_id: cardId,
+          created_at: new Date().toISOString(),
+        });
+      }
+    });
     res.status(201).json({ cardId, saved: true });
   });
 
-  app.delete('/api/saved-cards/:cardId', requireAuth, (req: AuthedRequest, res) => {
+  app.delete('/api/saved-cards/:cardId', requireAuth, async (req: AuthedRequest, res) => {
     const cardId = String(req.params.cardId || '').trim();
     if (!cardId || !VALID_CARD_IDS.has(cardId)) {
       res.status(400).json({ error: 'Invalid card ID.' });
       return;
     }
-    const db = loadDatabase();
-    db.saved_cards = db.saved_cards.filter(
-      (c) => !(c.user_id === req.auth?.userId && c.card_id === cardId),
-    );
-    saveDatabase(db);
+    await mutateDatabase((db) => {
+      db.saved_cards = db.saved_cards.filter(
+        (c) => !(c.user_id === req.auth?.userId && c.card_id === cardId),
+      );
+    });
     res.json({ cardId, saved: false });
   });
 
-  // 11. Live Telemetry Heartbeat & Stats
-  app.post('/api/telemetry/heartbeat', requireAuth, (req: AuthedRequest, res) => {
+  // 10b. Couple Promises / IOUs CRUD ("Cash This In Later")
+  function serializeIou(iou: import('./src/services/store').DbCoupleIou) {
+    return {
+      id: iou.id,
+      cardId: iou.card_id,
+      deckId: iou.deck_id,
+      deckTitle: iou.deck_title,
+      title: iou.title,
+      owedBy: iou.owed_by,
+      redeemed: iou.redeemed,
+      redeemedAt: iou.redeemed_at,
+      createdAt: iou.created_at,
+    };
+  }
+
+  app.get('/api/ious', requireAuth, (req: AuthedRequest, res) => {
     const db = loadDatabase();
+    const list = (db.ious || [])
+      .filter((i) => i.user_id === req.auth?.userId)
+      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+      .map(serializeIou);
+    res.json({ ious: list });
+  });
+
+  app.post('/api/ious', requireAuth, async (req: AuthedRequest, res) => {
+    const { title, owedBy, cardId, deckId, deckTitle } = req.body ?? {};
+    const cleanTitle = typeof title === 'string' ? sanitizePlainText(title, 160) : '';
+    if (cleanTitle.length < 3) {
+      res.status(400).json({ error: 'Promise text must be at least 3 characters.' });
+      return;
+    }
+    if (owedBy !== undefined && owedBy !== 'me' && owedBy !== 'partner' && owedBy !== 'both') {
+      res.status(400).json({ error: 'Invalid owedBy selection.' });
+      return;
+    }
+    const cleanCardId = typeof cardId === 'string' ? cardId.trim() : '';
+    if (cleanCardId && !VALID_CARD_IDS.has(cleanCardId)) {
+      res.status(400).json({ error: 'Invalid card reference.' });
+      return;
+    }
+    const cleanDeckId = typeof deckId === 'string' ? deckId.trim() : '';
+    if (cleanDeckId && !VALID_DECK_IDS.has(cleanDeckId)) {
+      res.status(400).json({ error: 'Invalid deck reference.' });
+      return;
+    }
+
+    const cleanOwedBy: 'me' | 'partner' | 'both' = owedBy ?? 'me';
+    const cleanDeckTitle =
+      typeof deckTitle === 'string' && sanitizePlainText(deckTitle, 80)
+        ? sanitizePlainText(deckTitle, 80)
+        : 'Custom Promise';
+
+    const item = await mutateDatabase((db) => {
+      const now = new Date().toISOString();
+      const record = {
+        id: crypto.randomUUID(),
+        user_id: req.auth!.userId,
+        card_id: cleanCardId,
+        deck_id: cleanDeckId,
+        deck_title: cleanDeckTitle,
+        title: cleanTitle,
+        owed_by: cleanOwedBy,
+        redeemed: false,
+        redeemed_at: null,
+        created_at: now,
+      };
+      db.ious = db.ious || [];
+      db.ious.push(record);
+      return record;
+    });
+
+    res.status(201).json({ iou: serializeIou(item) });
+  });
+
+  app.patch('/api/ious/:iouId', requireAuth, async (req: AuthedRequest, res) => {
+    const iouId = String(req.params.iouId || '').trim();
+    if (!iouId || typeof req.body?.redeemed !== 'boolean') {
+      res.status(400).json({ error: 'Valid iouId and boolean redeemed status are required.' });
+      return;
+    }
+
+    const updated = await mutateDatabase((db) => {
+      const item = (db.ious || []).find(
+        (i) => i.id === iouId && i.user_id === req.auth?.userId,
+      );
+      if (!item) return null;
+      item.redeemed = req.body.redeemed;
+      item.redeemed_at = req.body.redeemed ? new Date().toISOString() : null;
+      return item;
+    });
+
+    if (!updated) {
+      res.status(404).json({ error: 'Promise not found.' });
+      return;
+    }
+    res.json({ iou: serializeIou(updated) });
+  });
+
+  app.delete('/api/ious/:iouId', requireAuth, async (req: AuthedRequest, res) => {
+    const iouId = String(req.params.iouId || '').trim();
+    const deleted = await mutateDatabase((db) => {
+      const before = (db.ious || []).length;
+      db.ious = (db.ious || []).filter(
+        (i) => !(i.id === iouId && i.user_id === req.auth?.userId),
+      );
+      return db.ious.length < before;
+    });
+
+    if (!deleted) {
+      res.status(404).json({ error: 'Promise not found.' });
+      return;
+    }
+    res.json({ ok: true, id: iouId });
+  });
+
+  // 11. Live Telemetry Heartbeat (client pulse only; telemetry reads are owner-admin only)
+  app.post('/api/telemetry/heartbeat', requireAuth, async (req: AuthedRequest, res) => {
     const nowIso = new Date().toISOString();
-    const user = db.users.find((u) => u.id === req.auth?.userId);
-    const session = db.sessions.find((s) => s.id === req.auth?.sessionId);
-    if (user) {
-      user.last_seen_at = nowIso;
-    }
-    if (session && !session.revoked) {
-      session.last_active_at = nowIso;
-    }
-    saveDatabase(db);
+    await mutateDatabase((db) => {
+      const user = db.users.find((u) => u.id === req.auth?.userId);
+      const session = db.sessions.find((s) => s.id === req.auth?.sessionId);
+      if (user) {
+        user.last_seen_at = nowIso;
+      }
+      if (session && !session.revoked) {
+        session.last_active_at = nowIso;
+      }
+    });
     res.json({ ok: true, lastSeenAt: nowIso });
   });
 
-  app.get('/api/telemetry/stats', requireAuth, (_req, res) => {
+  app.get('/api/telemetry/stats', requireAdminAuth, (_req, res) => {
     const db = loadDatabase();
     const now = Date.now();
     const twoMinutesAgo = now - 2 * 60 * 1000;
@@ -1241,6 +1571,323 @@ async function createApp() {
     });
   });
 
+  // 12. Owner-Only Admin Auth & Monitoring Endpoints (/admin)
+  app.get('/api/admin/auth/config', (_req, res) => {
+    res.json({
+      requiresPassphrase: Boolean(ADMIN_PASSWORD),
+    });
+  });
+
+  app.post('/api/admin/auth/request-otp', async (req, res) => {
+    const { email, passphrase } = req.body ?? {};
+    if (!email || typeof email !== 'string' || !isValidEmail(email)) {
+      res.status(400).json({ error: 'Enter a valid owner email address.' });
+      return;
+    }
+
+    const adminLockKey = `admin:${ADMIN_EMAIL}`;
+    const lockRemaining = getAccountLoginLockRemainingSeconds(adminLockKey);
+    if (lockRemaining > 0) {
+      res.status(429).json({
+        error: `Too many failed owner attempts. Try again in ${Math.ceil(lockRemaining / 60)} minute(s).`,
+        retryAfterSeconds: lockRemaining,
+      });
+      return;
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const isOwnerEmail = timingSafeStringEqual(normalizedEmail, ADMIN_EMAIL);
+
+    if (!isOwnerEmail) {
+      recordFailedLoginAttempt(adminLockKey);
+      res.status(403).json({
+        error: 'Access denied. Only the Couplova owner account can open this console.',
+      });
+      return;
+    }
+
+    if (ADMIN_PASSWORD) {
+      const candidate = typeof passphrase === 'string' ? passphrase : '';
+      if (!timingSafeStringEqual(candidate, ADMIN_PASSWORD)) {
+        recordFailedLoginAttempt(adminLockKey);
+        res.status(401).json({ error: 'Incorrect owner passphrase.' });
+        return;
+      }
+    }
+
+    clearFailedLoginAttempts(adminLockKey);
+
+    const otpResult = await mutateDatabase((db) => createOtpInDb(db, normalizedEmail, 'admin'));
+    if (otpResult.cooldownRemaining > 0) {
+      res.status(429).json({
+        error: `Please wait ${otpResult.cooldownRemaining}s before requesting another code.`,
+        retryAfterSeconds: otpResult.cooldownRemaining,
+      });
+      return;
+    }
+
+    const template = buildAdminOtpEmailTemplate({
+      email: normalizedEmail,
+      code: otpResult.code,
+      expiryMinutes: OTP_TTL_MINUTES,
+    });
+
+    const dispatch = await dispatchTransactionalEmail({
+      to: normalizedEmail,
+      subject: template.subject,
+      html: template.html,
+    });
+
+    if (dispatch.deliveredVia === 'resend' || dispatch.deliveredVia === 'gmail') {
+      res.json({
+        message: '6-digit owner verification code sent to your inbox.',
+        email: normalizedEmail,
+        cooldownSeconds: OTP_RESEND_COOLDOWN_SECONDS,
+        deliveredVia: dispatch.deliveredVia,
+      });
+      return;
+    }
+
+    if (IS_PROD) {
+      res.status(502).json({
+        error:
+          dispatch.providerMessage ||
+          'Unable to dispatch owner verification email. Check SMTP or Resend secrets.',
+      });
+      return;
+    }
+
+    res.json({
+      message: 'Preview mode — enter the 6-digit owner code below.',
+      email: normalizedEmail,
+      cooldownSeconds: OTP_RESEND_COOLDOWN_SECONDS,
+      deliveredVia: 'preview',
+      devOtpPreview: otpResult.code,
+    });
+  });
+
+  app.post('/api/admin/auth/verify-otp', async (req, res) => {
+    const { email, code } = req.body ?? {};
+    if (!email || typeof email !== 'string' || !isValidEmail(email) || !code || typeof code !== 'string') {
+      res.status(400).json({ error: 'Valid owner email and 6-digit code are required.' });
+      return;
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!timingSafeStringEqual(normalizedEmail, ADMIN_EMAIL)) {
+      res.status(403).json({ error: 'Access denied. Owner privileges required.' });
+      return;
+    }
+
+    const cleanedCode = code.trim();
+    if (!/^\d{6}$/.test(cleanedCode)) {
+      res.status(400).json({ error: 'Code must be exactly 6 digits.' });
+      return;
+    }
+
+    const result = await mutateDatabase<{ status: number; error?: string }>((db) => {
+      const otpRecord = [...db.otp_codes]
+        .filter((o) => o.email === normalizedEmail && !o.used && o.purpose === 'admin')
+        .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0];
+
+      if (!otpRecord) {
+        return { status: 400, error: 'No active admin verification code found. Request a new one.' };
+      }
+
+      if (Date.parse(otpRecord.expires_at) <= Date.now()) {
+        otpRecord.used = true;
+        return { status: 400, error: 'Owner verification code expired. Request a new one.' };
+      }
+
+      if (otpRecord.attempts >= MAX_OTP_ATTEMPTS) {
+        otpRecord.used = true;
+        return { status: 429, error: 'Maximum attempts reached. Request a new code.' };
+      }
+
+      if (!verifySecret(cleanedCode, otpRecord.code_hash)) {
+        otpRecord.attempts += 1;
+        if (otpRecord.attempts >= MAX_OTP_ATTEMPTS) {
+          otpRecord.used = true;
+        }
+        const remaining = Math.max(0, MAX_OTP_ATTEMPTS - otpRecord.attempts);
+        return {
+          status: 400,
+          error:
+            remaining > 0
+              ? `Incorrect code. ${remaining} attempt${remaining === 1 ? '' : 's'} remaining.`
+              : 'Code invalidated after 3 failed attempts. Request a new one.',
+        };
+      }
+
+      otpRecord.used = true;
+      return { status: 200 };
+    });
+
+    if (result.status !== 200) {
+      res.status(result.status).json({ error: result.error });
+      return;
+    }
+
+    const adminToken = signAdminToken(normalizedEmail, 60 * 60);
+    res.json({
+      adminToken,
+      adminEmail: normalizedEmail,
+      expiresIn: 60 * 60,
+    });
+  });
+
+  app.get('/api/admin/overview', requireAdminAuth, (req: AuthedRequest, res) => {
+    const db = loadDatabase();
+    const now = Date.now();
+    const twoMinutesAgo = now - 2 * 60 * 1000;
+    const thirtyDaysAgo = now - THIRTY_DAYS_MS;
+
+    const savedCountsByUser = new Map<string, number>();
+    for (const item of db.saved_cards) {
+      savedCountsByUser.set(item.user_id, (savedCountsByUser.get(item.user_id) || 0) + 1);
+    }
+
+    const userMap = new Map(db.users.map((u) => [u.id, u]));
+
+    const currentlyOnline = db.users.filter(
+      (u) => u.is_verified && Date.parse(u.last_seen_at) >= twoMinutesAgo,
+    ).length;
+
+    const activeSessions = db.sessions.filter(
+      (s) =>
+        !s.revoked &&
+        Date.parse(s.last_active_at) >= thirtyDaysAgo &&
+        Date.parse(s.expires_at) > now,
+    );
+
+    const activeUserIds = new Set(activeSessions.map((s) => s.user_id));
+    const verifiedUsers = db.users.filter((u) => u.is_verified).length;
+
+    const users = [...db.users]
+      .sort((a, b) => Date.parse(b.last_seen_at) - Date.parse(a.last_seen_at))
+      .map((u) => ({
+        id: u.id,
+        fullName: u.full_name,
+        username: u.username,
+        email: u.email,
+        partnerName: u.partner_name,
+        country: u.country,
+        dateOfBirth: u.date_of_birth,
+        genderTheme: u.gender_theme,
+        activeDeckTheme: u.active_deck_theme,
+        isVerified: u.is_verified,
+        authMethod: u.google_sub
+          ? u.password_hash
+            ? 'Google + Password'
+            : 'Google OAuth'
+          : 'Email + Password',
+        savedCardsCount: savedCountsByUser.get(u.id) || 0,
+        onlineNow: u.is_verified && Date.parse(u.last_seen_at) >= twoMinutesAgo,
+        lastSeenAt: u.last_seen_at,
+        createdAt: u.created_at,
+      }));
+
+    const sessions = [...db.sessions]
+      .sort((a, b) => Date.parse(b.last_active_at) - Date.parse(a.last_active_at))
+      .slice(0, 60)
+      .map((s) => {
+        const owner = userMap.get(s.user_id);
+        return {
+          id: s.id,
+          userId: s.user_id,
+          userEmail: owner?.email || 'unknown',
+          userName: owner?.full_name || 'Unknown User',
+          lastActiveAt: s.last_active_at,
+          expiresAt: s.expires_at,
+          revoked: s.revoked,
+          expired: Date.parse(s.expires_at) <= now || isSessionInactiveExpired(s.last_active_at, now),
+        };
+      });
+
+    const otpEvents = [...db.otp_codes]
+      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+      .slice(0, 40)
+      .map((o) => ({
+        id: o.id,
+        email: o.email,
+        purpose: o.purpose,
+        attempts: o.attempts,
+        used: o.used,
+        expiresAt: o.expires_at,
+        createdAt: o.created_at,
+      }));
+
+    const gmailSmtpConfigured = Boolean(
+      process.env.GMAIL_SMTP_USER?.trim() && process.env.GMAIL_SMTP_APP_PASSWORD?.trim(),
+    );
+    const resendKey = process.env.RESEND_API_KEY?.trim();
+    const resendConfigured = Boolean(
+      resendKey && resendKey.startsWith('re_') && !resendKey.includes('xxxx'),
+    );
+    const googleOAuthConfigured = Boolean(process.env.GOOGLE_CLIENT_ID?.trim());
+
+    res.json({
+      adminEmail: req.adminAuth?.email || ADMIN_EMAIL,
+      telemetry: {
+        currentlyOnline,
+        totalActiveUsers: activeUserIds.size,
+        totalUsers: db.users.length,
+        verifiedUsers,
+        unverifiedUsers: db.users.length - verifiedUsers,
+        activeSessionsCount: activeSessions.length,
+        totalSavedCards: db.saved_cards.length,
+        windowMinutes: 2,
+        inactivityLimitDays: 30,
+      },
+      users,
+      sessions,
+      otpEvents,
+      system: {
+        environment: IS_PROD ? 'production' : 'development',
+        databaseMode: isExternalDatabaseConfigured()
+          ? 'PostgreSQL (Persistent)'
+          : 'Local JSON (.data/couply-db.json)',
+        gmailSmtpConfigured,
+        resendConfigured,
+        googleOAuthConfigured,
+        passphraseProtected: Boolean(ADMIN_PASSWORD),
+        serverTime: new Date(now).toISOString(),
+      },
+    });
+  });
+
+  app.post('/api/admin/sessions/:sessionId/revoke', requireAdminAuth, async (req, res) => {
+    const sessionId = String(req.params.sessionId || '').trim();
+    const found = await mutateDatabase((db) => {
+      const session = db.sessions.find((s) => s.id === sessionId);
+      if (!session) return false;
+      session.revoked = true;
+      return true;
+    });
+    if (!found) {
+      res.status(404).json({ error: 'Session not found.' });
+      return;
+    }
+    res.json({ ok: true, sessionId, revoked: true });
+  });
+
+  // Unmatched API routes must always return JSON 404 instead of SPA HTML
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'API endpoint not found.' });
+  });
+
+  // Global safe API error handler (never expose internal stack traces)
+  app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
+    if (req.path.startsWith('/api/')) {
+      console.error('[Couplova API Error]', err instanceof Error ? err.message : err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Unexpected server error. Please try again.' });
+      }
+      return;
+    }
+    next(err);
+  });
+
   if (!IS_PROD) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -1262,11 +1909,11 @@ async function createApp() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Couply server listening on http://localhost:${PORT}`);
+    console.log(`Couplova server listening on http://localhost:${PORT}`);
   });
 }
 
 createApp().catch((err) => {
-  console.error('Failed to start Couply server:', err);
+  console.error('Failed to start Couplova server:', err);
   process.exit(1);
 });

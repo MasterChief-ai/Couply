@@ -36,6 +36,12 @@ export const ACCESS_TOKEN_TTL_SECONDS = 15 * 60; // 15 minutes
 export const REFRESH_TOKEN_TTL_DAYS = 30; // 30 days
 export const OTP_TTL_MINUTES = 10; // 10 minutes
 
+export function timingSafeStringEqual(a: string, b: string): boolean {
+  const hashA = crypto.createHash('sha256').update(a).digest();
+  const hashB = crypto.createHash('sha256').update(b).digest();
+  return crypto.timingSafeEqual(hashA, hashB) && a.length === b.length;
+}
+
 export function hashSecret(raw: string): string {
   const salt = crypto.randomBytes(16).toString('hex');
   const derived = crypto.scryptSync(raw, salt, 64, { N: 16384, r: 8, p: 1 }).toString('hex');
@@ -43,14 +49,19 @@ export function hashSecret(raw: string): string {
 }
 
 export function verifySecret(raw: string, stored: string): boolean {
+  if (typeof raw !== 'string' || typeof stored !== 'string') return false;
   const parts = stored.split(':');
   if (parts.length !== 2) return false;
   const [salt, hashHex] = parts;
-  if (!salt || !hashHex) return false;
-  const expected = Buffer.from(hashHex, 'hex');
-  const actual = crypto.scryptSync(raw, salt, 64, { N: 16384, r: 8, p: 1 });
-  if (expected.length !== actual.length) return false;
-  return crypto.timingSafeEqual(expected, actual);
+  if (!salt || !hashHex || !/^[0-9a-f]{128}$/i.test(hashHex)) return false;
+  try {
+    const expected = Buffer.from(hashHex, 'hex');
+    const actual = crypto.scryptSync(raw, salt, 64, { N: 16384, r: 8, p: 1 });
+    if (expected.length !== actual.length) return false;
+    return crypto.timingSafeEqual(expected, actual);
+  } catch {
+    return false;
+  }
 }
 
 export function generateSixDigitOtp(): string {
@@ -66,7 +77,7 @@ export function hashRefreshToken(token: string): string {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-type CouplyTokenType = 'access' | 'google-pending' | 'email-confirm';
+type CouplovaTokenType = 'access' | 'google-pending' | 'email-confirm' | 'admin';
 
 export interface AccessTokenPayload {
   tokenType: 'access';
@@ -93,6 +104,14 @@ export interface EmailConfirmPayload {
   exp: number;
 }
 
+export interface AdminTokenPayload {
+  tokenType: 'admin';
+  role: 'owner';
+  email: string;
+  iat: number;
+  exp: number;
+}
+
 function base64UrlEncode(input: Buffer | string): string {
   return Buffer.from(input)
     .toString('base64')
@@ -116,10 +135,13 @@ function signJwtPayload(payloadObj: object): string {
   return `${header}.${payload}.${signature}`;
 }
 
-function verifySignedJwt<T extends { tokenType?: CouplyTokenType; exp?: number }>(
+function verifySignedJwt<T extends { tokenType?: CouplovaTokenType; exp?: number }>(
   token: string,
-  expectedType: CouplyTokenType,
+  expectedType: CouplovaTokenType,
 ): T | null {
+  if (typeof token !== 'string' || token.length === 0 || token.length > 4096) {
+    return null;
+  }
   const parts = token.split('.');
   if (parts.length !== 3) return null;
   const [header, payload, sig] = parts;
@@ -136,15 +158,22 @@ function verifySignedJwt<T extends { tokenType?: CouplyTokenType; exp?: number }
 
   try {
     const parsedHeader = JSON.parse(base64UrlDecode(header)) as { alg?: string; typ?: string };
+    if (!parsedHeader || typeof parsedHeader !== 'object') {
+      return null;
+    }
     if (parsedHeader.alg !== 'HS256' || parsedHeader.typ !== 'JWT') {
       return null;
     }
 
     const decoded = JSON.parse(base64UrlDecode(payload)) as T;
+    if (!decoded || typeof decoded !== 'object') {
+      return null;
+    }
     const now = Math.floor(Date.now() / 1000);
     if (
       decoded.tokenType !== expectedType ||
       typeof decoded.exp !== 'number' ||
+      !Number.isFinite(decoded.exp) ||
       decoded.exp <= now
     ) {
       return null;
@@ -221,6 +250,28 @@ export function signEmailConfirmToken(
 export function verifyEmailConfirmToken(token: string): EmailConfirmPayload | null {
   const decoded = verifySignedJwt<EmailConfirmPayload>(token, 'email-confirm');
   if (!decoded || !decoded.jti || !decoded.sub || !decoded.email) {
+    return null;
+  }
+  return decoded;
+}
+
+export function signAdminToken(
+  adminEmail: string,
+  ttlSeconds: number = 60 * 60,
+): string {
+  const now = Math.floor(Date.now() / 1000);
+  return signJwtPayload({
+    tokenType: 'admin',
+    role: 'owner',
+    email: adminEmail.trim().toLowerCase(),
+    iat: now,
+    exp: now + ttlSeconds,
+  } satisfies AdminTokenPayload);
+}
+
+export function verifyAdminToken(token: string): AdminTokenPayload | null {
+  const decoded = verifySignedJwt<AdminTokenPayload>(token, 'admin');
+  if (!decoded || decoded.role !== 'owner' || !decoded.email) {
     return null;
   }
   return decoded;

@@ -15,12 +15,25 @@ export interface CouplyUser {
   createdAt: string;
 }
 
+export interface CoupleIou {
+  id: string;
+  cardId: string;
+  deckId: string;
+  deckTitle: string;
+  title: string;
+  owedBy: 'me' | 'partner' | 'both';
+  redeemed: boolean;
+  redeemedAt: string | null;
+  createdAt: string;
+}
+
 const KEYS = {
   ACCESS_TOKEN: 'couply_access_token',
   REFRESH_TOKEN: 'couply_refresh_token',
   USER: 'couply_user',
   LOCKED_SPLASH: 'couply_locked_splash_gender',
   SAVED_CARDS_CACHE: 'couply_saved_cards_cache',
+  IOUS_CACHE: 'couplova_ious_cache',
 } as const;
 
 export function getStoredAccessToken(): string | null {
@@ -75,6 +88,8 @@ export function clearAuthSession(): void {
   localStorage.removeItem(KEYS.ACCESS_TOKEN);
   localStorage.removeItem(KEYS.REFRESH_TOKEN);
   localStorage.removeItem(KEYS.USER);
+  localStorage.removeItem(KEYS.SAVED_CARDS_CACHE);
+  localStorage.removeItem(KEYS.IOUS_CACHE);
   // Note: LOCKED_SPLASH remains preserved on device for the locked gender boot splash aesthetic
 }
 
@@ -91,4 +106,42 @@ export function getCachedSavedCardIds(): string[] {
 
 export function setCachedSavedCardIds(ids: string[]): void {
   localStorage.setItem(KEYS.SAVED_CARDS_CACHE, JSON.stringify(ids));
+}
+
+export function getCachedIous(): CoupleIou[] {
+  const raw = localStorage.getItem(KEYS.IOUS_CACHE);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+export function setCachedIous(ious: CoupleIou[]): void {
+  localStorage.setItem(KEYS.IOUS_CACHE, JSON.stringify(ious));
+}
+
+const ADMIN_KEYS = {
+  TOKEN: 'couplova_admin_token',
+  EMAIL: 'couplova_admin_email',
+} as const;
+
+export function getStoredAdminToken(): string | null {
+  return localStorage.getItem(ADMIN_KEYS.TOKEN);
+}
+
+export function getStoredAdminEmail(): string | null {
+  return localStorage.getItem(ADMIN_KEYS.EMAIL);
+}
+
+export function saveAdminSession(adminToken: string, adminEmail: string): void {
+  localStorage.setItem(ADMIN_KEYS.TOKEN, adminToken);
+  localStorage.setItem(ADMIN_KEYS.EMAIL, adminEmail);
+}
+
+export function clearAdminSession(): void {
+  localStorage.removeItem(ADMIN_KEYS.TOKEN);
+  localStorage.removeItem(ADMIN_KEYS.EMAIL);
 }

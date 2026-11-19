@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS otp_codes (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email TEXT NOT NULL,
     code_hash TEXT NOT NULL,
-    purpose TEXT CHECK (purpose IN ('signup', 'login')) NOT NULL,
+    purpose TEXT CHECK (purpose IN ('signup', 'login', 'admin')) NOT NULL,
     attempts INTEGER DEFAULT 0,
     expires_at TIMESTAMPTZ NOT NULL,
     used BOOLEAN DEFAULT FALSE,
@@ -45,5 +45,19 @@ CREATE TABLE IF NOT EXISTS saved_cards (
     PRIMARY KEY (user_id, card_id)
 );
 
+CREATE TABLE IF NOT EXISTS ious (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+    card_id TEXT NOT NULL,
+    deck_id TEXT NOT NULL,
+    deck_title TEXT NOT NULL,
+    title TEXT NOT NULL,
+    owed_by TEXT CHECK (owed_by IN ('me', 'partner')) NOT NULL DEFAULT 'partner',
+    redeemed BOOLEAN DEFAULT FALSE,
+    redeemed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_otp_codes_email_created ON otp_codes (email, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_user_active ON sessions (user_id, last_active_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ious_user_created ON ious (user_id, created_at DESC);

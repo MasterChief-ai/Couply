@@ -19,6 +19,9 @@ export function HomeScreen({
   onOpenSettings,
 }: HomeScreenProps) {
   const theme = resolveTheme(user.activeDeckTheme);
+  const rawPartner = user.partnerName?.trim();
+  const displayPartner =
+    rawPartner && rawPartner.toLowerCase() !== 'partner' ? rawPartner : 'your partner';
 
   return (
     <div
@@ -27,7 +30,7 @@ export function HomeScreen({
       className="min-h-screen w-full transition-colors duration-200"
     >
       <div className="w-full max-w-6xl mx-auto px-6 pb-14 pt-6 md:pt-8">
-        {/* Top Bar: Romantic italic Couply wordmark top-left, circular blush pill settings icon top-right */}
+        {/* Top Bar: Romantic italic Couplova wordmark top-left, circular blush pill settings icon top-right */}
         <header className="flex items-center justify-between pb-6 md:pb-8">
           <a
             href="#decks"
@@ -35,7 +38,7 @@ export function HomeScreen({
             className="font-wordmark text-[42px] leading-none tracking-[-0.02em] select-none whitespace-nowrap shrink-0"
             style={{ color: theme.primaryInk }}
           >
-            couply
+            couplova
           </a>
 
           <button
@@ -56,22 +59,27 @@ export function HomeScreen({
               className="font-display text-[28px] md:text-[32px] font-extrabold tracking-[-0.03em] leading-tight [text-wrap:balance]"
               style={{ color: theme.primaryInk }}
             >
-              Pass &amp; Play Decks
+              Just the Two of Us
             </h1>
             <p className="mt-1 text-[14px]" style={{ color: theme.secondaryInk }}>
-              Playing with {user.partnerName || 'Partner'} · {savedCount} saved
+              You &amp; {displayPartner} • <span className="tabular-nums">{savedCount}</span> favorites kept
             </p>
           </div>
           <p className="text-[13px] font-medium tabular-nums" style={{ color: theme.secondaryInk }}>
-            5 Decks Ready Offline
+            {GAME_DECKS.length} moods ready for tonight
           </p>
         </div>
 
         {/* Tactile, Colorful Stack of Solid-Matte Playing-Card Tiles (28px radius, zero borders, zero shadows) */}
         <main className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 gap-4 md:gap-5">
           {GAME_DECKS.map((deck, idx) => {
-            // Make cards 01 and 02 wider hero cards on desktop 6-col grid, 03-05 2-col each
-            const desktopSpan = idx < 2 ? 'lg:col-span-3' : 'lg:col-span-2';
+            // 01-02 span half each on desktop, 03-05 form a 3-up row, 06 After Hours spans full width
+            const desktopSpan =
+              idx < 2
+                ? 'lg:col-span-3'
+                : idx === 5
+                  ? 'md:col-span-2 lg:col-span-6'
+                  : 'lg:col-span-2';
 
             return (
               <motion.button
@@ -95,7 +103,7 @@ export function HomeScreen({
                     {deck.indexNumber}
                   </span>
                   <span
-                    className="text-[13px] font-medium"
+                    className="text-[13px] font-medium tabular-nums"
                     style={{ color: deck.mutedTextColor }}
                   >
                     {deck.cards.length} Cards
@@ -108,7 +116,7 @@ export function HomeScreen({
                   </h2>
                   <div className="mt-2.5 flex items-end justify-between gap-4">
                     <p
-                      className="text-[14px] leading-snug max-w-sm"
+                      className={`text-[14px] leading-snug ${idx === 5 ? 'max-w-xl' : 'max-w-sm'}`}
                       style={{ color: deck.mutedTextColor }}
                     >
                       {deck.descriptor}

@@ -71,15 +71,29 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
 
   const canLogin = Boolean(loginEmailValid && loginPassword);
   const canCreateAccount = Boolean(
-    fullName.trim() &&
-      username.trim() &&
-      partnerName.trim() &&
+    fullName.trim().length >= 2 &&
+      /^[a-zA-Z0-9_]{3,24}$/.test(username.trim()) &&
+      partnerName.trim().length >= 1 &&
+      partnerName.trim().length <= 40 &&
       signupEmailValid &&
       signupPasswordValid &&
       signupPasswordsMatch &&
       (genderTheme === 'female' || genderTheme === 'male') &&
       acceptedTerms,
   );
+  const canCompleteGoogle = Boolean(
+    /^[a-zA-Z0-9_]{3,24}$/.test(googleUsername.trim()) &&
+      googlePartnerName.trim().length >= 1 &&
+      googlePartnerName.trim().length <= 40 &&
+      (!googleDob.trim() || isValidDateOfBirth(googleDob)) &&
+      googleAcceptedTerms,
+  );
+
+  useEffect(() => {
+    if (initialNotice !== undefined) {
+      setNotice(initialNotice ?? null);
+    }
+  }, [initialNotice]);
 
   useEffect(() => {
     if (cooldown <= 0) return;
@@ -123,7 +137,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
         setSignupEmail(loginEmail.trim());
         setFieldErrors({});
         setError(null);
-        setNotice("Account doesn't exist yet. Create your Couply account below.");
+        setNotice("Account doesn't exist yet. Create your Couplova account below.");
         setStep('signup');
       } else {
         setError(err instanceof Error ? err.message : 'Unable to log in.');
@@ -295,11 +309,11 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
       setError('Username must be 3–24 letters, numbers, or underscores.');
       return;
     }
-    if (!googlePartnerName.trim()) {
-      setError("Please enter your partner's name.");
+    if (!googlePartnerName.trim() || googlePartnerName.trim().length > 40) {
+      setError("Please enter your partner's name (max 40 characters).");
       return;
     }
-    if (!isValidDateOfBirth(googleDob)) {
+    if (googleDob.trim() && !isValidDateOfBirth(googleDob)) {
       setError('Please enter a valid date of birth (13+).');
       return;
     }
@@ -346,7 +360,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
         <section className="lg:col-span-5 flex flex-col justify-between gap-6">
           <div>
             <span className="font-wordmark text-[42px] leading-none tracking-[-0.02em] text-[#1A1113] block mb-6">
-              couply
+              couplova
             </span>
             <h1 className="font-display text-[32px] lg:text-[40px] font-extrabold leading-[1.12] tracking-[-0.03em] text-[#1A1113] max-w-md [text-wrap:balance]">
               Intimate pass-and-play cards for two.
@@ -359,11 +373,11 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
           <div className="hidden lg:grid grid-cols-2 gap-3 pt-4 max-w-md">
             <div className="rounded-[24px] p-5 bg-[#9E472A] text-white">
               <p className="text-[12px] font-medium text-white/75">01 · Core Deck</p>
-              <p className="font-display font-bold text-[18px] mt-1 tracking-tight">Deep Conversations</p>
+              <p className="font-display font-bold text-[18px] mt-1 tracking-tight">Balls Deep Conversations</p>
             </div>
             <div className="rounded-[24px] p-5 bg-[#F4C2C2] text-[#1A1113]">
               <p className="text-[12px] font-medium text-[#1A1113]/65">03 · 3 Tiers</p>
-              <p className="font-display font-bold text-[18px] mt-1 tracking-tight">We're Not Really Strangers</p>
+              <p className="font-display font-bold text-[18px] mt-1 tracking-tight">Closer Than You Think</p>
             </div>
           </div>
         </section>
@@ -466,12 +480,12 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
                     value={loginEmail}
                     onChange={(e) => setLoginEmail(e.target.value)}
                     onBlur={() => setLoginEmailTouched(true)}
-                    placeholder="maya@couply.app"
+                    placeholder="maya@couplova.app"
                     className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
                   />
                   {loginEmailTouched && loginEmail.trim() && !loginEmailValid && (
                     <p className="mt-1 text-[12px] text-[#9E472A]">
-                      Enter a valid email address (e.g. maya@couply.app).
+                      Enter a valid email address (e.g. maya@couplova.app).
                     </p>
                   )}
                 </div>
@@ -748,7 +762,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
                     className="mt-0.5 h-5 w-5 accent-[#1A1113] rounded"
                   />
                   <span className="text-[13px] leading-snug text-[#1A1113]/75">
-                    I agree to the Couply Terms &amp; Conditions and Privacy Policy.
+                    I agree to the Couplova Terms &amp; Conditions and Privacy Policy.
                   </span>
                 </label>
                 {fieldErrors.acceptedTerms && (
@@ -794,7 +808,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
 
               <div>
                 <h2 className="font-display text-[28px] font-extrabold tracking-[-0.03em] text-[#1A1113]">
-                  Finish your Couply profile
+                  Finish your Couplova profile
                 </h2>
                 <p className="mt-1 text-[14px] text-[#1A1113]/65">
                   Signed in with Google as <span className="font-medium text-[#1A1113]">{googlePrefillName}</span> ({googlePrefillEmail}). Pick a unique username and enter your partner&apos;s name.
@@ -832,7 +846,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
 
                 <div>
                   <label htmlFor="google-dob" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
-                    Date of Birth
+                    Date of Birth <span className="text-[#1A1113]/40 font-normal">(optional)</span>
                   </label>
                   <input
                     id="google-dob"
@@ -891,15 +905,15 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
                   className="mt-0.5 h-5 w-5 accent-[#1A1113] rounded"
                 />
                 <span className="text-[13px] leading-snug text-[#1A1113]/75">
-                  I agree to the Couply Terms &amp; Conditions and Privacy Policy.
+                  I agree to the Couplova Terms &amp; Conditions and Privacy Policy.
                 </span>
               </label>
 
               <button
                 type="submit"
-                disabled={!googleAcceptedTerms || submitting}
+                disabled={!canCompleteGoogle || submitting}
                 className={`w-full min-h-[52px] rounded-full font-display font-bold text-[15px] tracking-tight transition-colors ${
-                  !googleAcceptedTerms
+                  !canCompleteGoogle
                     ? 'bg-[#1A1113]/20 text-[#1A1113]/45 cursor-not-allowed'
                     : 'bg-[#1A1113] text-[#FAF8F5] active:scale-[0.985] transition-transform disabled:opacity-60'
                 }`}
@@ -971,7 +985,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
                 disabled={submitting}
                 className="w-full min-h-[52px] rounded-full bg-[#1A1113] text-[#FAF8F5] font-display font-bold text-[15px] tracking-tight active:scale-[0.985] transition-transform disabled:opacity-60"
               >
-                {submitting ? 'Verifying...' : 'Verify & Enter Couply'}
+                {submitting ? 'Verifying...' : 'Verify & Enter Couplova'}
               </button>
 
               <div className="flex items-center justify-between pt-1">

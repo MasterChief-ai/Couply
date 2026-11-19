@@ -186,3 +186,124 @@ export function prevCardIndex(currentIndex: number): number {
 export function formatEndOfDeckCopy(deckTitle: string, totalCards: number): string {
   return `You finished all ${totalCards} cards in ${deckTitle}. Play again or pick another deck.`;
 }
+
+export function personalizePrompt(text: string, partnerName?: string | null): string {
+  const cleaned = partnerName?.trim();
+  if (!cleaned || cleaned.toLowerCase() === 'partner') {
+    return text;
+  }
+
+  return text
+    .replace(/\byour partner['’]s\b/gi, `${cleaned}'s`)
+    .replace(/\byour partner\b/gi, cleaned);
+}
+
+export function shuffleCards<T>(items: readonly T[], rng: () => number = Math.random): T[] {
+  const copy = [...items];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(rng() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+export function prepareDeckForPlay<T extends { id: string; cards: readonly StoryCard[] }>(
+  deck: T,
+  options: { preserveOrder?: boolean; rng?: () => number } = {},
+): T {
+  const { preserveOrder = false, rng = Math.random } = options;
+  if (preserveOrder || deck.id === 'after-hours') {
+    return {
+      ...deck,
+      cards: [...deck.cards],
+    };
+  }
+  return {
+    ...deck,
+    cards: shuffleCards(deck.cards, rng),
+  };
+}
+
+const MISS_PENALTIES = [
+  '10-second slow kiss—no rushing.',
+  'Owe your partner a 10-minute neck or shoulder rub later.',
+  'Maintain unbroken eye contact for 10 full seconds.',
+  'Whisper one honest thing you want tonight right in their ear.',
+  'Winner picks the very next move once this deck closes.',
+];
+
+export interface BlindPredictionOutcome {
+  matched: boolean;
+  lockedOptionIndex: number;
+  guessedOptionIndex: number;
+  penalty: string | null;
+}
+
+export function evaluateBlindPrediction(
+  lockedOptionIndex: number,
+  guessedOptionIndex: number,
+  cardId: string,
+): BlindPredictionOutcome {
+  const matched = lockedOptionIndex === guessedOptionIndex;
+  if (matched) {
+    return {
+      matched: true,
+      lockedOptionIndex,
+      guessedOptionIndex,
+      penalty: null,
+    };
+  }
+  let hash = 0;
+  for (let i = 0; i < cardId.length; i += 1) {
+    hash = (hash * 31 + cardId.charCodeAt(i)) >>> 0;
+  }
+  return {
+    matched: false,
+    lockedOptionIndex,
+    guessedOptionIndex,
+    penalty: MISS_PENALTIES[hash % MISS_PENALTIES.length],
+  };
+}
+
+export interface SessionVetoTokens {
+  partnerA: number;
+  partnerB: number;
+}
+
+export function createInitialVetoTokens(): SessionVetoTokens {
+  return { partnerA: 2, partnerB: 2 };
+}
+
+export function consumeVetoToken(
+  tokens: SessionVetoTokens,
+  who: 'partnerA' | 'partnerB',
+): { ok: boolean; nextTokens: SessionVetoTokens } {
+  if (tokens[who] <= 0) {
+    return { ok: false, nextTokens: tokens };
+  }
+  return {
+    ok: true,
+    nextTokens: {
+      ...tokens,
+      [who]: tokens[who] - 1,
+    },
+  };
+}
+
+export function suggestIouFromCard(card: StoryCard, partnerName?: string | null): string {
+  const cleanedPrompt = personalizePrompt(card.prompt, partnerName)
+    .replace(/^Final Card — /i, '')
+    .trim();
+
+  if (card.kicker?.includes('Dare')) {
+    return cleanedPrompt.replace(/\.$/, '');
+  }
+  if (card.type === 'dilemma' && card.options?.length) {
+    return personalizePrompt(card.options[0], partnerName);
+  }
+  if (cleanedPrompt.length <= 90) {
+    return cleanedPrompt;
+  }
+  return `${cleanedPrompt.slice(0, 87).trimEnd()}...`;
+}
+
