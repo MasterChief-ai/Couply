@@ -6,6 +6,7 @@ export interface CouplyUser {
   username: string;
   email: string;
   country: string;
+  dateOfBirth: string;
   partnerName: string;
   genderTheme: GenderTheme;
   activeDeckTheme: ActiveDeckThemeId;

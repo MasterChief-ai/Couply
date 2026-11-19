@@ -1,17 +1,24 @@
 import React, { useEffect, useState } from 'react';
-import { motion } from 'motion/react';
+import { AnimatePresence, motion } from 'motion/react';
 import { ApiError, couplyApi, type OtpChallengeResponse } from '../services/api';
 import { LOCKED_SPLASH_TOKENS, type GenderTheme } from '../constants/theme';
 import type { CouplyUser } from '../services/storage';
-import { OTP_RESEND_COOLDOWN_SECONDS, validateSignupForm } from '../utils/gameLogic';
-import { BackArrowIcon, CheckIcon } from './Icons';
+import {
+  OTP_RESEND_COOLDOWN_SECONDS,
+  getPasswordErrorMessage,
+  isStrongPassword,
+  isValidDateOfBirth,
+  isValidEmail,
+  validateSignupForm,
+} from '../utils/gameLogic';
+import { BackArrowIcon, CheckIcon, GoogleLogoIcon } from './Icons';
 
 interface AuthScreenProps {
   initialNotice?: string | null;
   onAuthenticated: (user: CouplyUser) => void;
 }
 
-type AuthStep = 'login' | 'signup' | 'verify-otp';
+type AuthStep = 'login' | 'signup' | 'verify-otp' | 'google-complete';
 
 export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) {
   const [step, setStep] = useState<AuthStep>('login');
@@ -27,6 +34,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
   const [fullName, setFullName] = useState('');
   const [username, setUsername] = useState('');
   const [country, setCountry] = useState('');
+  const [dateOfBirth, setDateOfBirth] = useState('');
   const [signupEmail, setSignupEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -34,6 +42,17 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
   const [genderTheme, setGenderTheme] = useState<GenderTheme>('female');
   const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [offerLoginForEmail, setOfferLoginForEmail] = useState<string | null>(null);
+
+  // Google profile completion fields
+  const [googlePendingToken, setGooglePendingToken] = useState('');
+  const [googlePrefillEmail, setGooglePrefillEmail] = useState('');
+  const [googlePrefillName, setGooglePrefillName] = useState('');
+  const [googleUsername, setGoogleUsername] = useState('');
+  const [googlePartnerName, setGooglePartnerName] = useState('');
+  const [googleDob, setGoogleDob] = useState('');
+  const [googleGender, setGoogleGender] = useState<GenderTheme>('female');
+  const [googleAcceptedTerms, setGoogleAcceptedTerms] = useState(false);
 
   // OTP fields
   const [otpEmail, setOtpEmail] = useState('');
@@ -41,6 +60,26 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
   const [otpCode, setOtpCode] = useState('');
   const [cooldown, setCooldown] = useState(0);
   const [devOtpPreview, setDevOtpPreview] = useState<string | null>(null);
+  const [loginEmailTouched, setLoginEmailTouched] = useState(false);
+  const [signupEmailTouched, setSignupEmailTouched] = useState(false);
+
+  const loginEmailValid = isValidEmail(loginEmail);
+  const signupEmailValid = isValidEmail(signupEmail);
+  const signupPasswordError = getPasswordErrorMessage(password);
+  const signupPasswordValid = isStrongPassword(password);
+  const signupPasswordsMatch = Boolean(password && confirmPassword && password === confirmPassword);
+
+  const canLogin = Boolean(loginEmailValid && loginPassword);
+  const canCreateAccount = Boolean(
+    fullName.trim() &&
+      username.trim() &&
+      partnerName.trim() &&
+      signupEmailValid &&
+      signupPasswordValid &&
+      signupPasswordsMatch &&
+      (genderTheme === 'female' || genderTheme === 'male') &&
+      acceptedTerms,
+  );
 
   useEffect(() => {
     if (cooldown <= 0) return;
@@ -65,8 +104,14 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
     e.preventDefault();
     setError(null);
     setNotice(null);
-    if (!loginEmail.trim() || !loginPassword) {
-      setError('Enter both your email and password.');
+    setOfferLoginForEmail(null);
+    if (!isValidEmail(loginEmail)) {
+      setLoginEmailTouched(true);
+      setError('Please enter a valid email address.');
+      return;
+    }
+    if (!loginPassword) {
+      setError('Enter your password.');
       return;
     }
     setSubmitting(true);
@@ -74,7 +119,15 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
       const res = await couplyApi.login({ email: loginEmail.trim(), password: loginPassword });
       handleOtpChallenge(res);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to log in.');
+      if (err instanceof ApiError && err.code === 'USER_NOT_FOUND') {
+        setSignupEmail(loginEmail.trim());
+        setFieldErrors({});
+        setError(null);
+        setNotice("Account doesn't exist yet. Create your Couply account below.");
+        setStep('signup');
+      } else {
+        setError(err instanceof Error ? err.message : 'Unable to log in.');
+      }
     } finally {
       setSubmitting(false);
     }
@@ -84,11 +137,13 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
     e.preventDefault();
     setError(null);
     setNotice(null);
+    setOfferLoginForEmail(null);
 
     const validation = validateSignupForm({
       fullName,
       username,
       country,
+      dateOfBirth,
       email: signupEmail,
       password,
       confirmPassword,
@@ -109,6 +164,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
         fullName: fullName.trim(),
         username: username.trim(),
         country: country.trim(),
+        dateOfBirth: dateOfBirth.trim(),
         email: signupEmail.trim(),
         password,
         confirmPassword,
@@ -118,6 +174,9 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
       });
       handleOtpChallenge(res);
     } catch (err) {
+      if (err instanceof ApiError && err.code === 'EMAIL_ALREADY_EXISTS') {
+        setOfferLoginForEmail(signupEmail.trim());
+      }
       setError(err instanceof Error ? err.message : 'Unable to create account.');
     } finally {
       setSubmitting(false);
@@ -134,7 +193,11 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
     }
     setSubmitting(true);
     try {
-      const session = await couplyApi.verifyOtp({ email: otpEmail, code: cleaned });
+      const session = await couplyApi.verifyOtp({
+        email: otpEmail,
+        code: cleaned,
+        purpose: otpPurpose,
+      });
       onAuthenticated(session.user);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Invalid verification code.');
@@ -197,11 +260,23 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
         if (!response.credential) return;
         setSubmitting(true);
         try {
-          const session = await couplyApi.googleSignIn({
+          const result = await couplyApi.googleSignIn({
             idToken: response.credential,
-            genderTheme,
           });
-          onAuthenticated(session.user);
+          if ('needsProfileCompletion' in result && result.needsProfileCompletion) {
+            setGooglePendingToken(result.pendingToken);
+            setGooglePrefillEmail(result.prefill.email);
+            setGooglePrefillName(result.prefill.fullName);
+            setGoogleUsername('');
+            setGooglePartnerName('');
+            setGoogleDob('');
+            setGoogleAcceptedTerms(false);
+            setError(null);
+            setNotice(null);
+            setStep('google-complete');
+          } else if ('user' in result) {
+            onAuthenticated(result.user);
+          }
         } catch (err) {
           setError(err instanceof Error ? err.message : 'Google Sign-In failed.');
         } finally {
@@ -210,6 +285,45 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
       },
     });
     googleAccounts.prompt();
+  }
+
+  async function handleCompleteGoogleProfile(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+
+    if (!/^[a-zA-Z0-9_]{3,24}$/.test(googleUsername.trim())) {
+      setError('Username must be 3–24 letters, numbers, or underscores.');
+      return;
+    }
+    if (!googlePartnerName.trim()) {
+      setError("Please enter your partner's name.");
+      return;
+    }
+    if (!isValidDateOfBirth(googleDob)) {
+      setError('Please enter a valid date of birth (13+).');
+      return;
+    }
+    if (!googleAcceptedTerms) {
+      setError('You must agree to the Terms & Conditions.');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const session = await couplyApi.completeGoogleProfile({
+        pendingToken: googlePendingToken,
+        username: googleUsername.trim(),
+        partnerName: googlePartnerName.trim(),
+        dateOfBirth: googleDob.trim(),
+        genderTheme: googleGender,
+        acceptedTerms: googleAcceptedTerms,
+      });
+      onAuthenticated(session.user);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to finish setup.');
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   async function handleDemoSession() {
@@ -238,7 +352,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
               Intimate pass-and-play cards for two.
             </h1>
             <p className="mt-4 text-[15px] leading-relaxed text-[#1A1113]/65 max-w-md">
-              Built for one shared phone on the couch, in the car, or across the table. All five decks work offline with zero lag.
+              For Romeo &amp; Juliet couples who want to deepen their relationship beyond a Friday dinner date at a five-star restaurant.
             </p>
           </div>
 
@@ -256,13 +370,14 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
 
         {/* Form Column */}
         <section className="lg:col-span-7 w-full max-w-lg mx-auto lg:mx-0 lg:ml-auto">
-          {step !== 'verify-otp' && (
+          {(step === 'login' || step === 'signup') && (
             <div className="flex items-center gap-2 p-1.5 bg-[#F1EDE6] rounded-full mb-7">
               <button
                 type="button"
                 onClick={() => {
                   setStep('login');
                   setError(null);
+                  setOfferLoginForEmail(null);
                   setFieldErrors({});
                 }}
                 className={`flex-1 min-h-[44px] rounded-full text-[14px] font-medium transition-colors ${
@@ -278,6 +393,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
                 onClick={() => {
                   setStep('signup');
                   setError(null);
+                  setOfferLoginForEmail(null);
                   setFieldErrors({});
                 }}
                 className={`flex-1 min-h-[44px] rounded-full text-[14px] font-medium transition-colors ${
@@ -300,88 +416,133 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
           {error && (
             <div
               role="alert"
-              className="mb-5 rounded-[18px] bg-[#9E472A] px-4 py-3 text-[14px] text-white"
+              className="mb-5 rounded-[18px] bg-[#9E472A] px-4 py-3 text-[14px] text-white flex flex-wrap items-center justify-between gap-3"
             >
-              {error}
+              <span>{error}</span>
+              {offerLoginForEmail && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoginEmail(offerLoginForEmail);
+                    setError(null);
+                    setOfferLoginForEmail(null);
+                    setNotice('Enter your password to log in to your existing account.');
+                    setStep('login');
+                  }}
+                  className="px-4 py-1.5 rounded-full bg-white text-[#9E472A] font-display font-bold text-[13px] shrink-0"
+                >
+                  Log in instead
+                </button>
+              )}
             </div>
           )}
 
-          {step === 'login' && (
-            <motion.form
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.18 }}
-              onSubmit={handleLoginSubmit}
-              className="space-y-4"
-            >
-              <div>
-                <label htmlFor="login-email" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
-                  Email
-                </label>
-                <input
-                  id="login-email"
-                  type="email"
-                  autoComplete="email"
-                  value={loginEmail}
-                  onChange={(e) => setLoginEmail(e.target.value)}
-                  placeholder="maya@couply.app"
-                  className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
-                />
-              </div>
-
-              <div>
-                <label htmlFor="login-password" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
-                  Password
-                </label>
-                <input
-                  id="login-password"
-                  type="password"
-                  autoComplete="current-password"
-                  value={loginPassword}
-                  onChange={(e) => setLoginPassword(e.target.value)}
-                  placeholder="Enter your password"
-                  className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
-                />
-              </div>
-
-              <button
-                type="submit"
-                disabled={submitting}
-                className="w-full min-h-[52px] rounded-full bg-[#1A1113] text-[#FAF8F5] font-display font-bold text-[15px] tracking-tight active:scale-[0.985] transition-transform disabled:opacity-60"
+          <AnimatePresence mode="wait" initial={false}>
+            {step === 'login' && (
+              <motion.form
+                key="login-form"
+                initial={{ opacity: 0, y: 30 }}
+                animate={{
+                  opacity: 1,
+                  y: 0,
+                  transition: { duration: 0.72, ease: [0.22, 1, 0.36, 1] },
+                }}
+                exit={{
+                  opacity: 0,
+                  y: -10,
+                  transition: { duration: 0.22, ease: [0.4, 0, 0.6, 1] },
+                }}
+                onSubmit={handleLoginSubmit}
+                className="space-y-4"
               >
-                {submitting ? 'Sending 6-Digit Code...' : 'Continue with Email OTP'}
-              </button>
+                <div>
+                  <label htmlFor="login-email" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
+                    Email
+                  </label>
+                  <input
+                    id="login-email"
+                    type="email"
+                    autoComplete="email"
+                    value={loginEmail}
+                    onChange={(e) => setLoginEmail(e.target.value)}
+                    onBlur={() => setLoginEmailTouched(true)}
+                    placeholder="maya@couply.app"
+                    className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
+                  />
+                  {loginEmailTouched && loginEmail.trim() && !loginEmailValid && (
+                    <p className="mt-1 text-[12px] text-[#9E472A]">
+                      Enter a valid email address (e.g. maya@couply.app).
+                    </p>
+                  )}
+                </div>
 
-              <div className="pt-2 space-y-3">
+                <div>
+                  <label htmlFor="login-password" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
+                    Password
+                  </label>
+                  <input
+                    id="login-password"
+                    type="password"
+                    autoComplete="current-password"
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    placeholder="Enter your password"
+                    className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
+                  />
+                </div>
+
                 <button
-                  type="button"
-                  onClick={handleGoogleSignIn}
-                  disabled={submitting}
-                  className="w-full min-h-[48px] rounded-full bg-[#F1EDE6] text-[#1A1113] font-medium text-[14px] hover:bg-[#E7E1D8] transition-colors"
+                  type="submit"
+                  disabled={!canLogin || submitting}
+                  className={`w-full min-h-[52px] rounded-full font-display font-bold text-[15px] tracking-tight transition-colors ${
+                    !canLogin
+                      ? 'bg-[#1A1113]/20 text-[#1A1113]/45 cursor-not-allowed'
+                      : 'bg-[#1A1113] text-[#FAF8F5] active:scale-[0.985] transition-transform disabled:opacity-60'
+                  }`}
                 >
-                  Continue with Google
+                  {submitting ? 'Checking account...' : 'Login'}
                 </button>
 
-                <button
-                  type="button"
-                  onClick={handleDemoSession}
-                  disabled={submitting}
-                  className="w-full min-h-[48px] rounded-full bg-[#F4C2C2] text-[#1A1113] font-medium text-[14px] hover:bg-[#E8AEAE] transition-colors"
-                >
-                  Play Instantly as Maya &amp; Julian (Demo)
-                </button>
-              </div>
-            </motion.form>
-          )}
+                <div className="pt-2 space-y-3">
+                  <button
+                    type="button"
+                    onClick={handleGoogleSignIn}
+                    disabled={submitting}
+                    className="w-full min-h-[48px] rounded-full bg-[#F1EDE6] text-[#1A1113] font-medium text-[14px] hover:bg-[#E7E1D8] transition-colors flex items-center justify-center gap-2.5"
+                  >
+                    <GoogleLogoIcon className="w-[18px] h-[18px]" />
+                    <span>Continue with Google</span>
+                  </button>
 
-          {step === 'signup' && (
-            <motion.form
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.18 }}
-              onSubmit={handleSignupSubmit}
-              className="space-y-4"
-            >
+                  <button
+                    type="button"
+                    onClick={handleDemoSession}
+                    disabled={submitting}
+                    className="w-full min-h-[48px] rounded-full bg-[#F4C2C2] text-[#1A1113] font-medium text-[14px] hover:bg-[#E8AEAE] transition-colors"
+                  >
+                    Play Instantly as Maya &amp; Julian (Demo)
+                  </button>
+                </div>
+              </motion.form>
+            )}
+
+            {step === 'signup' && (
+              <motion.form
+                key="signup-form"
+                initial={{ opacity: 0, y: 34 }}
+                animate={{
+                  opacity: 1,
+                  y: 0,
+                  transition: { duration: 0.76, ease: [0.22, 1, 0.36, 1] },
+                }}
+                exit={{
+                  opacity: 0,
+                  y: -10,
+                  transition: { duration: 0.22, ease: [0.4, 0, 0.6, 1] },
+                }}
+                onSubmit={handleSignupSubmit}
+                className="space-y-4"
+              >
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label htmlFor="signup-fullname" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
@@ -421,7 +582,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label htmlFor="signup-country" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
-                    Country
+                    Country <span className="text-[#1A1113]/40 font-normal">(optional)</span>
                   </label>
                   <input
                     id="signup-country"
@@ -448,24 +609,49 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
                     placeholder="Julian"
                     className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
                   />
+                  {fieldErrors.partnerName && (
+                    <p className="mt-1 text-[12px] text-[#9E472A]">{fieldErrors.partnerName}</p>
+                  )}
                 </div>
               </div>
 
-              <div>
-                <label htmlFor="signup-email" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
-                  Email
-                </label>
-                <input
-                  id="signup-email"
-                  type="email"
-                  value={signupEmail}
-                  onChange={(e) => setSignupEmail(e.target.value)}
-                  placeholder="you@example.com"
-                  className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
-                />
-                {fieldErrors.email && (
-                  <p className="mt-1 text-[12px] text-[#9E472A]">{fieldErrors.email}</p>
-                )}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="signup-dob" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
+                    Date of Birth <span className="text-[#1A1113]/40 font-normal">(optional)</span>
+                  </label>
+                  <input
+                    id="signup-dob"
+                    type="date"
+                    value={dateOfBirth}
+                    onChange={(e) => setDateOfBirth(e.target.value)}
+                    className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] focus:outline-2 focus:outline-[#1A1113]"
+                  />
+                  {fieldErrors.dateOfBirth && (
+                    <p className="mt-1 text-[12px] text-[#9E472A]">{fieldErrors.dateOfBirth}</p>
+                  )}
+                </div>
+
+                <div>
+                  <label htmlFor="signup-email" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
+                    Email
+                  </label>
+                  <input
+                    id="signup-email"
+                    type="email"
+                    value={signupEmail}
+                    onChange={(e) => setSignupEmail(e.target.value)}
+                    onBlur={() => setSignupEmailTouched(true)}
+                    placeholder="you@example.com"
+                    className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
+                  />
+                  {(fieldErrors.email ||
+                    (signupEmailTouched && signupEmail.trim() && !signupEmailValid)) && (
+                    <p className="mt-1 text-[12px] text-[#9E472A]">
+                      {fieldErrors.email || 'Enter a valid email address (e.g. you@example.com).'}
+                    </p>
+                  )}
+                </div>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -478,11 +664,13 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
                     type="password"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Min. 8 characters"
+                    placeholder="8+ chars, A-z, 0-9 & symbol"
                     className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
                   />
-                  {fieldErrors.password && (
-                    <p className="mt-1 text-[12px] text-[#9E472A]">{fieldErrors.password}</p>
+                  {(fieldErrors.password || (password.length > 0 && signupPasswordError)) && (
+                    <p className="mt-1 text-[12px] text-[#9E472A]">
+                      {fieldErrors.password || signupPasswordError}
+                    </p>
                   )}
                 </div>
 
@@ -498,8 +686,11 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
                     placeholder="Repeat password"
                     className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
                   />
-                  {fieldErrors.confirmPassword && (
-                    <p className="mt-1 text-[12px] text-[#9E472A]">{fieldErrors.confirmPassword}</p>
+                  {(fieldErrors.confirmPassword ||
+                    (confirmPassword.length > 0 && !signupPasswordsMatch)) && (
+                    <p className="mt-1 text-[12px] text-[#9E472A]">
+                      {fieldErrors.confirmPassword || 'Passwords do not match.'}
+                    </p>
                   )}
                 </div>
               </div>
@@ -567,10 +758,153 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
 
               <button
                 type="submit"
-                disabled={submitting}
-                className="w-full min-h-[52px] rounded-full bg-[#1A1113] text-[#FAF8F5] font-display font-bold text-[15px] tracking-tight active:scale-[0.985] transition-transform disabled:opacity-60"
+                disabled={!canCreateAccount || submitting}
+                className={`w-full min-h-[52px] rounded-full font-display font-bold text-[15px] tracking-tight transition-colors ${
+                  !canCreateAccount
+                    ? 'bg-[#1A1113]/20 text-[#1A1113]/45 cursor-not-allowed'
+                    : 'bg-[#1A1113] text-[#FAF8F5] active:scale-[0.985] transition-transform disabled:opacity-60'
+                }`}
               >
-                {submitting ? 'Creating Account...' : 'Create Account & Send 6-Digit Code'}
+                {submitting ? 'Creating Account...' : 'Create Account'}
+              </button>
+            </motion.form>
+            )}
+          </AnimatePresence>
+
+          {step === 'google-complete' && (
+            <motion.form
+              key="google-complete-form"
+              initial={{ opacity: 0, y: 14 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.34, ease: [0.16, 1, 0.3, 1] }}
+              onSubmit={handleCompleteGoogleProfile}
+              className="space-y-4"
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  setStep('login');
+                  setError(null);
+                }}
+                className="inline-flex items-center gap-2 min-h-[44px] text-[14px] font-medium text-[#1A1113]/70 hover:text-[#1A1113]"
+              >
+                <BackArrowIcon className="w-4 h-4" />
+                <span>Back</span>
+              </button>
+
+              <div>
+                <h2 className="font-display text-[28px] font-extrabold tracking-[-0.03em] text-[#1A1113]">
+                  Finish your Couply profile
+                </h2>
+                <p className="mt-1 text-[14px] text-[#1A1113]/65">
+                  Signed in with Google as <span className="font-medium text-[#1A1113]">{googlePrefillName}</span> ({googlePrefillEmail}). Pick a unique username and enter your partner&apos;s name.
+                </p>
+              </div>
+
+              <div>
+                <label htmlFor="google-username" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
+                  Choose Username
+                </label>
+                <input
+                  id="google-username"
+                  type="text"
+                  value={googleUsername}
+                  onChange={(e) => setGoogleUsername(e.target.value)}
+                  placeholder="romeo_juliet"
+                  className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="google-partner" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
+                    Partner&apos;s Name
+                  </label>
+                  <input
+                    id="google-partner"
+                    type="text"
+                    value={googlePartnerName}
+                    onChange={(e) => setGooglePartnerName(e.target.value)}
+                    placeholder="Juliet"
+                    className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="google-dob" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
+                    Date of Birth
+                  </label>
+                  <input
+                    id="google-dob"
+                    type="date"
+                    value={googleDob}
+                    onChange={(e) => setGoogleDob(e.target.value)}
+                    className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] focus:outline-2 focus:outline-[#1A1113]"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <span className="block text-[13px] font-medium text-[#1A1113]/75 mb-2">
+                  Lock Your Boot Splash Theme
+                </span>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setGoogleGender('female')}
+                    style={{
+                      backgroundColor:
+                        googleGender === 'female'
+                          ? LOCKED_SPLASH_TOKENS.female.canvas
+                          : '#F1EDE6',
+                      color: LOCKED_SPLASH_TOKENS.female.primaryInk,
+                    }}
+                    className="min-h-[54px] rounded-[18px] px-4 flex items-center justify-between font-display font-bold text-[15px] transition-colors"
+                  >
+                    <span>Her</span>
+                    {googleGender === 'female' && <CheckIcon className="w-4 h-4" />}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setGoogleGender('male')}
+                    style={{
+                      backgroundColor:
+                        googleGender === 'male'
+                          ? LOCKED_SPLASH_TOKENS.male.canvas
+                          : '#F1EDE6',
+                      color: LOCKED_SPLASH_TOKENS.male.primaryInk,
+                    }}
+                    className="min-h-[54px] rounded-[18px] px-4 flex items-center justify-between font-display font-bold text-[15px] transition-colors"
+                  >
+                    <span>Him</span>
+                    {googleGender === 'male' && <CheckIcon className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
+              <label className="flex items-start gap-3 cursor-pointer py-1">
+                <input
+                  type="checkbox"
+                  checked={googleAcceptedTerms}
+                  onChange={(e) => setGoogleAcceptedTerms(e.target.checked)}
+                  className="mt-0.5 h-5 w-5 accent-[#1A1113] rounded"
+                />
+                <span className="text-[13px] leading-snug text-[#1A1113]/75">
+                  I agree to the Couply Terms &amp; Conditions and Privacy Policy.
+                </span>
+              </label>
+
+              <button
+                type="submit"
+                disabled={!googleAcceptedTerms || submitting}
+                className={`w-full min-h-[52px] rounded-full font-display font-bold text-[15px] tracking-tight transition-colors ${
+                  !googleAcceptedTerms
+                    ? 'bg-[#1A1113]/20 text-[#1A1113]/45 cursor-not-allowed'
+                    : 'bg-[#1A1113] text-[#FAF8F5] active:scale-[0.985] transition-transform disabled:opacity-60'
+                }`}
+              >
+                {submitting ? 'Creating Account...' : 'Create Account'}
               </button>
             </motion.form>
           )}

@@ -5,6 +5,8 @@ import {
   getLockedSplashColor,
   getResendCooldownRemaining,
   isSessionInactiveExpired,
+  isStrongPassword,
+  isValidEmail,
   lockOptionForPrivacyHandoff,
   nextCardIndex,
   prevCardIndex,
@@ -13,13 +15,36 @@ import {
 } from './gameLogic';
 import { GAME_DECKS } from '../constants/decks';
 
-test('validateSignupForm enforces all required fields and T&C checkbox', () => {
+test('isValidEmail validates proper email format and rejects arbitrary text', () => {
+  assert.equal(isValidEmail('maya@couply.app'), true);
+  assert.equal(isValidEmail('romeo.montague+1@sub.domain.co.uk'), true);
+  assert.equal(isValidEmail('anything'), false);
+  assert.equal(isValidEmail('maya@domain'), false);
+  assert.equal(isValidEmail('maya@domain.c'), false);
+  assert.equal(isValidEmail('maya@.com'), false);
+  assert.equal(isValidEmail('.maya@couply.app'), false);
+  assert.equal(isValidEmail('maya..lin@couply.app'), false);
+});
+
+test('isStrongPassword requires 8+ chars, uppercase, lowercase, number, and special character', () => {
+  assert.equal(isStrongPassword('Verona1597!'), true);
+  assert.equal(isStrongPassword('CouplyDemo2026!'), true);
+  assert.equal(isStrongPassword('verona1597!'), false); // missing uppercase
+  assert.equal(isStrongPassword('VERONA1597!'), false); // missing lowercase
+  assert.equal(isStrongPassword('VeronaPass!'), false); // missing number
+  assert.equal(isStrongPassword('Verona1597'), false); // missing special character
+  assert.equal(isStrongPassword('Ve1!'), false); // under 8 chars
+});
+
+test('validateSignupForm enforces required fields (with optional country & DOB), strong password, email format, and T&C checkbox', () => {
   const invalid = validateSignupForm({
     fullName: '',
     username: 'a',
     country: '',
+    partnerName: '',
+    dateOfBirth: '2024-01-01',
     email: 'not-an-email',
-    password: '123',
+    password: 'weakpassword',
     confirmPassword: '456',
     genderTheme: null,
     acceptedTerms: false,
@@ -28,17 +53,21 @@ test('validateSignupForm enforces all required fields and T&C checkbox', () => {
   assert.equal(invalid.valid, false);
   assert.ok(invalid.errors.fullName);
   assert.ok(invalid.errors.username);
-  assert.ok(invalid.errors.country);
+  assert.ok(invalid.errors.partnerName);
+  assert.equal(invalid.errors.country, undefined);
+  assert.ok(invalid.errors.dateOfBirth);
   assert.ok(invalid.errors.email);
   assert.ok(invalid.errors.password);
   assert.ok(invalid.errors.confirmPassword);
   assert.ok(invalid.errors.genderTheme);
   assert.ok(invalid.errors.acceptedTerms);
 
-  const valid = validateSignupForm({
+  const validWithOptionalEmpty = validateSignupForm({
     fullName: 'Maya Lin',
     username: 'maya_lin',
-    country: 'Canada',
+    country: '',
+    partnerName: 'Julian',
+    dateOfBirth: '',
     email: 'maya@example.com',
     password: 'StrongPassword9!',
     confirmPassword: 'StrongPassword9!',
@@ -46,8 +75,8 @@ test('validateSignupForm enforces all required fields and T&C checkbox', () => {
     acceptedTerms: true,
   });
 
-  assert.equal(valid.valid, true);
-  assert.deepEqual(valid.errors, {});
+  assert.equal(validWithOptionalEmpty.valid, true);
+  assert.deepEqual(validWithOptionalEmpty.errors, {});
 });
 
 test('getLockedSplashColor returns exact locked hex for female and male', () => {

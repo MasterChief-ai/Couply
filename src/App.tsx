@@ -67,11 +67,43 @@ export default function App() {
     };
   }, []);
 
-  // Handle ?autostart=1 or verify existing session on mount
+  // Handle ?confirm=... email link, ?autostart=1, or verify existing session on mount
   useEffect(() => {
     let active = true;
 
     async function bootstrap() {
+      if (typeof window !== 'undefined') {
+        const params = new URLSearchParams(window.location.search);
+        const confirmToken = params.get('confirm');
+        if (confirmToken) {
+          // Immediately scrub the token from URL / browser history to prevent referrer leaks
+          params.delete('confirm');
+          const cleanSearch = params.toString();
+          const cleanUrl = `${window.location.pathname}${cleanSearch ? `?${cleanSearch}` : ''}`;
+          window.history.replaceState({}, '', cleanUrl);
+
+          try {
+            const session = await couplyApi.confirmEmailLink({ token: confirmToken });
+            if (!active) return;
+            setUser(session.user);
+            setLockedSplashGender(session.user.genderTheme);
+            setAuthNotice(null);
+            setRoute('home');
+            void syncSavedCards();
+            return;
+          } catch (err) {
+            if (!active) return;
+            setAuthNotice(
+              err instanceof Error
+                ? err.message
+                : 'Confirmation link expired or already used. Please request a new code.',
+            );
+            setRoute('auth');
+            return;
+          }
+        }
+      }
+
       if (isAutostart && !getStoredAccessToken()) {
         try {
           const demo = await couplyApi.demoSignIn();

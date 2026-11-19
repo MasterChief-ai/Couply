@@ -60,9 +60,14 @@ async function refreshAccessToken(): Promise<string | null> {
     return null;
   }
 
-  const data = (await res.json()) as { accessToken: string; user: CouplyUser };
+  const data = (await res.json()) as {
+    accessToken: string;
+    refreshToken?: string;
+    user: CouplyUser;
+  };
   saveAuthSession({
     accessToken: data.accessToken,
+    refreshToken: data.refreshToken,
     user: data.user,
   });
   return data.accessToken;
@@ -134,6 +139,17 @@ export interface AuthSessionResponse {
   user: CouplyUser;
 }
 
+export interface GoogleProfileCompletionPrompt {
+  needsProfileCompletion: true;
+  pendingToken: string;
+  prefill: {
+    fullName: string;
+    email: string;
+  };
+}
+
+export type GoogleSignInResponse = AuthSessionResponse | GoogleProfileCompletionPrompt;
+
 export interface TelemetryStats {
   currentlyOnline: number;
   totalActiveUsers: number;
@@ -146,6 +162,7 @@ export const couplyApi = {
     fullName: string;
     username: string;
     country: string;
+    dateOfBirth: string;
     email: string;
     password: string;
     confirmPassword: string;
@@ -173,7 +190,7 @@ export const couplyApi = {
     });
   },
 
-  async verifyOtp(payload: { email: string; code: string }) {
+  async verifyOtp(payload: { email: string; code: string; purpose?: 'signup' | 'login' }) {
     const res = await apiFetch<AuthSessionResponse>('/api/auth/verify-otp', {
       method: 'POST',
       body: JSON.stringify(payload),
@@ -182,8 +199,36 @@ export const couplyApi = {
     return res;
   },
 
-  async googleSignIn(payload: { idToken: string; genderTheme: GenderTheme }) {
-    const res = await apiFetch<AuthSessionResponse>('/api/auth/google', {
+  async confirmEmailLink(payload: { token: string }) {
+    const res = await apiFetch<AuthSessionResponse>('/api/auth/confirm-email-link', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    saveAuthSession(res);
+    return res;
+  },
+
+  async googleSignIn(payload: { idToken: string }) {
+    const res = await apiFetch<GoogleSignInResponse>('/api/auth/google', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if ('accessToken' in res) {
+      saveAuthSession(res);
+    }
+    return res;
+  },
+
+  async completeGoogleProfile(payload: {
+    pendingToken: string;
+    username: string;
+    partnerName: string;
+    dateOfBirth: string;
+    country?: string;
+    genderTheme: GenderTheme;
+    acceptedTerms: boolean;
+  }) {
+    const res = await apiFetch<AuthSessionResponse>('/api/auth/google/complete', {
       method: 'POST',
       body: JSON.stringify(payload),
     });

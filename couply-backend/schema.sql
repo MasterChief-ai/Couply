@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS users (
     username TEXT UNIQUE NOT NULL,
     email TEXT UNIQUE NOT NULL,
     country TEXT NOT NULL,
+    date_of_birth DATE,
     partner_name TEXT DEFAULT 'Partner',
     password_hash TEXT,
     google_sub TEXT UNIQUE,

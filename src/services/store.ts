@@ -10,6 +10,7 @@ export interface DbUser {
   username: string;
   email: string;
   country: string;
+  date_of_birth: string;
   partner_name: string;
   password_hash: string | null;
   google_sub: string | null;
@@ -46,11 +47,24 @@ export interface DbSavedCard {
   created_at: string;
 }
 
+export interface DbUsedConfirmJti {
+  jti: string;
+  expires_at: string;
+}
+
+export interface DbRotatedRefreshHash {
+  token_hash: string;
+  user_id: string;
+  expires_at: string;
+}
+
 export interface CouplyDatabase {
   users: DbUser[];
   otp_codes: DbOtpCode[];
   sessions: DbSession[];
   saved_cards: DbSavedCard[];
+  used_confirm_jtis: DbUsedConfirmJti[];
+  rotated_refresh_hashes: DbRotatedRefreshHash[];
 }
 
 const DATA_DIR = path.resolve(process.cwd(), '.data');
@@ -70,6 +84,7 @@ function createSeedDatabase(): CouplyDatabase {
         username: 'maya_lin',
         email: 'maya@couply.app',
         country: 'United States',
+        date_of_birth: '1999-05-14',
         partner_name: 'Julian',
         password_hash: hashSecret('CouplyDemo2026!'),
         google_sub: null,
@@ -85,6 +100,7 @@ function createSeedDatabase(): CouplyDatabase {
         username: 'julian_v',
         email: 'julian@couply.app',
         country: 'United States',
+        date_of_birth: '1998-09-22',
         partner_name: 'Maya',
         password_hash: hashSecret('CouplyDemo2026!'),
         google_sub: null,
@@ -118,36 +134,62 @@ function createSeedDatabase(): CouplyDatabase {
         created_at: now,
       },
     ],
+    used_confirm_jtis: [],
+    rotated_refresh_hashes: [],
   };
+}
+
+function ensureDataDir(): void {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
+  }
+}
+
+function writeDbAtomic(db: CouplyDatabase): void {
+  ensureDataDir();
+  const tempPath = path.join(DATA_DIR, `.couply-db.${process.pid}.${crypto.randomUUID()}.tmp`);
+  fs.writeFileSync(tempPath, JSON.stringify(db, null, 2), { encoding: 'utf8', mode: 0o600 });
+  fs.renameSync(tempPath, DB_PATH);
 }
 
 export function loadDatabase(): CouplyDatabase {
   try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
+    ensureDataDir();
     if (!fs.existsSync(DB_PATH)) {
       const seed = createSeedDatabase();
-      fs.writeFileSync(DB_PATH, JSON.stringify(seed, null, 2), 'utf8');
+      writeDbAtomic(seed);
       return seed;
     }
     const raw = fs.readFileSync(DB_PATH, 'utf8');
-    const parsed = JSON.parse(raw) as CouplyDatabase;
+    const parsed = JSON.parse(raw) as Partial<CouplyDatabase>;
     return {
       users: parsed.users || [],
       otp_codes: parsed.otp_codes || [],
       sessions: parsed.sessions || [],
       saved_cards: parsed.saved_cards || [],
+      used_confirm_jtis: parsed.used_confirm_jtis || [],
+      rotated_refresh_hashes: parsed.rotated_refresh_hashes || [],
     };
   } catch {
-    const seed = createSeedDatabase();
-    return seed;
+    return createSeedDatabase();
   }
 }
 
 export function saveDatabase(db: CouplyDatabase): void {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  }
-  fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf8');
+  const now = Date.now();
+  const oneHourAgo = now - 60 * 60 * 1000;
+
+  // Prune expired single-use OTPs, used confirmation JTIs, and expired rotated refresh hashes
+  db.otp_codes = db.otp_codes.filter((o) => {
+    const exp = Date.parse(o.expires_at);
+    return !o.used ? exp > now : exp > oneHourAgo;
+  });
+  db.used_confirm_jtis = (db.used_confirm_jtis || []).filter(
+    (entry) => Date.parse(entry.expires_at) > now,
+  );
+  db.rotated_refresh_hashes = (db.rotated_refresh_hashes || []).filter(
+    (entry) => Date.parse(entry.expires_at) > now,
+  );
+
+  writeDbAtomic(db);
 }
