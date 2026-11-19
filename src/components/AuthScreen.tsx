@@ -1,0 +1,662 @@
+import React, { useEffect, useState } from 'react';
+import { motion } from 'motion/react';
+import { ApiError, couplyApi, type OtpChallengeResponse } from '../services/api';
+import { LOCKED_SPLASH_TOKENS, type GenderTheme } from '../constants/theme';
+import type { CouplyUser } from '../services/storage';
+import { OTP_RESEND_COOLDOWN_SECONDS, validateSignupForm } from '../utils/gameLogic';
+import { BackArrowIcon, CheckIcon } from './Icons';
+
+interface AuthScreenProps {
+  initialNotice?: string | null;
+  onAuthenticated: (user: CouplyUser) => void;
+}
+
+type AuthStep = 'login' | 'signup' | 'verify-otp';
+
+export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) {
+  const [step, setStep] = useState<AuthStep>('login');
+  const [notice, setNotice] = useState<string | null>(initialNotice ?? null);
+  const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  // Login fields
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+
+  // Signup fields
+  const [fullName, setFullName] = useState('');
+  const [username, setUsername] = useState('');
+  const [country, setCountry] = useState('');
+  const [signupEmail, setSignupEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [partnerName, setPartnerName] = useState('');
+  const [genderTheme, setGenderTheme] = useState<GenderTheme>('female');
+  const [acceptedTerms, setAcceptedTerms] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+
+  // OTP fields
+  const [otpEmail, setOtpEmail] = useState('');
+  const [otpPurpose, setOtpPurpose] = useState<'signup' | 'login'>('signup');
+  const [otpCode, setOtpCode] = useState('');
+  const [cooldown, setCooldown] = useState(0);
+  const [devOtpPreview, setDevOtpPreview] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const timer = window.setInterval(() => {
+      setCooldown((prev) => (prev > 0 ? prev - 1 : 0));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [cooldown]);
+
+  function handleOtpChallenge(res: OtpChallengeResponse) {
+    setOtpEmail(res.email);
+    setOtpPurpose(res.purpose);
+    setCooldown(res.cooldownSeconds || OTP_RESEND_COOLDOWN_SECONDS);
+    setDevOtpPreview(res.devOtpPreview || null);
+    setOtpCode('');
+    setError(null);
+    setNotice(res.message);
+    setStep('verify-otp');
+  }
+
+  async function handleLoginSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setNotice(null);
+    if (!loginEmail.trim() || !loginPassword) {
+      setError('Enter both your email and password.');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const res = await couplyApi.login({ email: loginEmail.trim(), password: loginPassword });
+      handleOtpChallenge(res);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to log in.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleSignupSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    setNotice(null);
+
+    const validation = validateSignupForm({
+      fullName,
+      username,
+      country,
+      email: signupEmail,
+      password,
+      confirmPassword,
+      genderTheme,
+      partnerName,
+      acceptedTerms,
+    });
+
+    setFieldErrors(validation.errors);
+    if (!validation.valid) {
+      setError('Please fix the highlighted fields before continuing.');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const res = await couplyApi.signup({
+        fullName: fullName.trim(),
+        username: username.trim(),
+        country: country.trim(),
+        email: signupEmail.trim(),
+        password,
+        confirmPassword,
+        genderTheme,
+        partnerName: partnerName.trim() || 'Partner',
+        acceptedTerms,
+      });
+      handleOtpChallenge(res);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to create account.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleVerifyOtp(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    const cleaned = otpCode.replace(/\D/g, '').slice(0, 6);
+    if (cleaned.length !== 6) {
+      setError('Enter the complete 6-digit verification code.');
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const session = await couplyApi.verifyOtp({ email: otpEmail, code: cleaned });
+      onAuthenticated(session.user);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Invalid verification code.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleResendOtp() {
+    if (cooldown > 0) return;
+    setError(null);
+    setSubmitting(true);
+    try {
+      const res = await couplyApi.resendOtp({ email: otpEmail, purpose: otpPurpose });
+      setCooldown(res.cooldownSeconds || OTP_RESEND_COOLDOWN_SECONDS);
+      setDevOtpPreview(res.devOtpPreview || null);
+      setNotice(res.message);
+    } catch (err) {
+      if (err instanceof ApiError && err.retryAfterSeconds) {
+        setCooldown(err.retryAfterSeconds);
+      }
+      setError(err instanceof Error ? err.message : 'Unable to resend code.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleGoogleSignIn() {
+    setError(null);
+    const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+    if (!googleClientId) {
+      setError(
+        'Google Sign-In needs VITE_GOOGLE_CLIENT_ID and GOOGLE_CLIENT_ID in environment secrets.',
+      );
+      return;
+    }
+
+    const googleAccounts = (window as unknown as {
+      google?: {
+        accounts?: {
+          id?: {
+            initialize: (cfg: {
+              client_id: string;
+              callback: (resp: { credential?: string }) => void;
+            }) => void;
+            prompt: () => void;
+          };
+        };
+      };
+    }).google?.accounts?.id;
+
+    if (!googleAccounts) {
+      setError('Google Identity Services script is unavailable.');
+      return;
+    }
+
+    googleAccounts.initialize({
+      client_id: googleClientId,
+      callback: async (response: { credential?: string }) => {
+        if (!response.credential) return;
+        setSubmitting(true);
+        try {
+          const session = await couplyApi.googleSignIn({
+            idToken: response.credential,
+            genderTheme,
+          });
+          onAuthenticated(session.user);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : 'Google Sign-In failed.');
+        } finally {
+          setSubmitting(false);
+        }
+      },
+    });
+    googleAccounts.prompt();
+  }
+
+  async function handleDemoSession() {
+    setError(null);
+    setSubmitting(true);
+    try {
+      const session = await couplyApi.demoSignIn();
+      onAuthenticated(session.user);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to start demo session.');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="min-h-screen w-full bg-[#FAF8F5] text-[#1A1113] flex flex-col">
+      <div className="w-full max-w-6xl mx-auto flex-1 grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 px-6 py-8 lg:py-14 items-center">
+        {/* Editorial Left Column (visible cleanly on desktop, compact header on mobile) */}
+        <section className="lg:col-span-5 flex flex-col justify-between gap-6">
+          <div>
+            <span className="font-wordmark text-[42px] leading-none tracking-[-0.02em] text-[#1A1113] block mb-6">
+              couply
+            </span>
+            <h1 className="font-display text-[32px] lg:text-[40px] font-extrabold leading-[1.12] tracking-[-0.03em] text-[#1A1113] max-w-md [text-wrap:balance]">
+              Intimate pass-and-play cards for two.
+            </h1>
+            <p className="mt-4 text-[15px] leading-relaxed text-[#1A1113]/65 max-w-md">
+              Built for one shared phone on the couch, in the car, or across the table. All five decks work offline with zero lag.
+            </p>
+          </div>
+
+          <div className="hidden lg:grid grid-cols-2 gap-3 pt-4 max-w-md">
+            <div className="rounded-[24px] p-5 bg-[#9E472A] text-white">
+              <p className="text-[12px] font-medium text-white/75">01 · Core Deck</p>
+              <p className="font-display font-bold text-[18px] mt-1 tracking-tight">Deep Conversations</p>
+            </div>
+            <div className="rounded-[24px] p-5 bg-[#F4C2C2] text-[#1A1113]">
+              <p className="text-[12px] font-medium text-[#1A1113]/65">03 · 3 Tiers</p>
+              <p className="font-display font-bold text-[18px] mt-1 tracking-tight">We're Not Really Strangers</p>
+            </div>
+          </div>
+        </section>
+
+        {/* Form Column */}
+        <section className="lg:col-span-7 w-full max-w-lg mx-auto lg:mx-0 lg:ml-auto">
+          {step !== 'verify-otp' && (
+            <div className="flex items-center gap-2 p-1.5 bg-[#F1EDE6] rounded-full mb-7">
+              <button
+                type="button"
+                onClick={() => {
+                  setStep('login');
+                  setError(null);
+                  setFieldErrors({});
+                }}
+                className={`flex-1 min-h-[44px] rounded-full text-[14px] font-medium transition-colors ${
+                  step === 'login'
+                    ? 'bg-[#1A1113] text-[#FAF8F5]'
+                    : 'text-[#1A1113]/70 hover:text-[#1A1113]'
+                }`}
+              >
+                Log In
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setStep('signup');
+                  setError(null);
+                  setFieldErrors({});
+                }}
+                className={`flex-1 min-h-[44px] rounded-full text-[14px] font-medium transition-colors ${
+                  step === 'signup'
+                    ? 'bg-[#1A1113] text-[#FAF8F5]'
+                    : 'text-[#1A1113]/70 hover:text-[#1A1113]'
+                }`}
+              >
+                Sign Up
+              </button>
+            </div>
+          )}
+
+          {notice && (
+            <div className="mb-5 rounded-[18px] bg-[#F4C2C2]/45 px-4 py-3 text-[14px] text-[#1A1113]">
+              {notice}
+            </div>
+          )}
+
+          {error && (
+            <div
+              role="alert"
+              className="mb-5 rounded-[18px] bg-[#9E472A] px-4 py-3 text-[14px] text-white"
+            >
+              {error}
+            </div>
+          )}
+
+          {step === 'login' && (
+            <motion.form
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.18 }}
+              onSubmit={handleLoginSubmit}
+              className="space-y-4"
+            >
+              <div>
+                <label htmlFor="login-email" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
+                  Email
+                </label>
+                <input
+                  id="login-email"
+                  type="email"
+                  autoComplete="email"
+                  value={loginEmail}
+                  onChange={(e) => setLoginEmail(e.target.value)}
+                  placeholder="maya@couply.app"
+                  className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
+                />
+              </div>
+
+              <div>
+                <label htmlFor="login-password" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
+                  Password
+                </label>
+                <input
+                  id="login-password"
+                  type="password"
+                  autoComplete="current-password"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  placeholder="Enter your password"
+                  className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={submitting}
+                className="w-full min-h-[52px] rounded-full bg-[#1A1113] text-[#FAF8F5] font-display font-bold text-[15px] tracking-tight active:scale-[0.985] transition-transform disabled:opacity-60"
+              >
+                {submitting ? 'Sending 6-Digit Code...' : 'Continue with Email OTP'}
+              </button>
+
+              <div className="pt-2 space-y-3">
+                <button
+                  type="button"
+                  onClick={handleGoogleSignIn}
+                  disabled={submitting}
+                  className="w-full min-h-[48px] rounded-full bg-[#F1EDE6] text-[#1A1113] font-medium text-[14px] hover:bg-[#E7E1D8] transition-colors"
+                >
+                  Continue with Google
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleDemoSession}
+                  disabled={submitting}
+                  className="w-full min-h-[48px] rounded-full bg-[#F4C2C2] text-[#1A1113] font-medium text-[14px] hover:bg-[#E8AEAE] transition-colors"
+                >
+                  Play Instantly as Maya &amp; Julian (Demo)
+                </button>
+              </div>
+            </motion.form>
+          )}
+
+          {step === 'signup' && (
+            <motion.form
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.18 }}
+              onSubmit={handleSignupSubmit}
+              className="space-y-4"
+            >
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="signup-fullname" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
+                    Full Name
+                  </label>
+                  <input
+                    id="signup-fullname"
+                    type="text"
+                    value={fullName}
+                    onChange={(e) => setFullName(e.target.value)}
+                    placeholder="Maya Lin"
+                    className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
+                  />
+                  {fieldErrors.fullName && (
+                    <p className="mt-1 text-[12px] text-[#9E472A]">{fieldErrors.fullName}</p>
+                  )}
+                </div>
+
+                <div>
+                  <label htmlFor="signup-username" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
+                    Username
+                  </label>
+                  <input
+                    id="signup-username"
+                    type="text"
+                    value={username}
+                    onChange={(e) => setUsername(e.target.value)}
+                    placeholder="maya_lin"
+                    className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
+                  />
+                  {fieldErrors.username && (
+                    <p className="mt-1 text-[12px] text-[#9E472A]">{fieldErrors.username}</p>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="signup-country" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
+                    Country
+                  </label>
+                  <input
+                    id="signup-country"
+                    type="text"
+                    value={country}
+                    onChange={(e) => setCountry(e.target.value)}
+                    placeholder="United States"
+                    className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
+                  />
+                  {fieldErrors.country && (
+                    <p className="mt-1 text-[12px] text-[#9E472A]">{fieldErrors.country}</p>
+                  )}
+                </div>
+
+                <div>
+                  <label htmlFor="signup-partner" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
+                    Partner&apos;s Name
+                  </label>
+                  <input
+                    id="signup-partner"
+                    type="text"
+                    value={partnerName}
+                    onChange={(e) => setPartnerName(e.target.value)}
+                    placeholder="Julian"
+                    className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label htmlFor="signup-email" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
+                  Email
+                </label>
+                <input
+                  id="signup-email"
+                  type="email"
+                  value={signupEmail}
+                  onChange={(e) => setSignupEmail(e.target.value)}
+                  placeholder="you@example.com"
+                  className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
+                />
+                {fieldErrors.email && (
+                  <p className="mt-1 text-[12px] text-[#9E472A]">{fieldErrors.email}</p>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label htmlFor="signup-password" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
+                    Create Password
+                  </label>
+                  <input
+                    id="signup-password"
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Min. 8 characters"
+                    className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
+                  />
+                  {fieldErrors.password && (
+                    <p className="mt-1 text-[12px] text-[#9E472A]">{fieldErrors.password}</p>
+                  )}
+                </div>
+
+                <div>
+                  <label htmlFor="signup-confirm" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
+                    Confirm Password
+                  </label>
+                  <input
+                    id="signup-confirm"
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="Repeat password"
+                    className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
+                  />
+                  {fieldErrors.confirmPassword && (
+                    <p className="mt-1 text-[12px] text-[#9E472A]">{fieldErrors.confirmPassword}</p>
+                  )}
+                </div>
+              </div>
+
+              {/* Gender Theme Selector (Permanently locks boot splash color) */}
+              <div>
+                <span className="block text-[13px] font-medium text-[#1A1113]/75 mb-2">
+                  Lock Your Boot Splash Theme
+                </span>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setGenderTheme('female')}
+                    style={{
+                      backgroundColor:
+                        genderTheme === 'female'
+                          ? LOCKED_SPLASH_TOKENS.female.canvas
+                          : '#F1EDE6',
+                      color: LOCKED_SPLASH_TOKENS.female.primaryInk,
+                    }}
+                    className="min-h-[54px] rounded-[18px] px-4 flex items-center justify-between font-display font-bold text-[15px] transition-colors"
+                  >
+                    <span>Her</span>
+                    {genderTheme === 'female' && <CheckIcon className="w-4 h-4" />}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setGenderTheme('male')}
+                    style={{
+                      backgroundColor:
+                        genderTheme === 'male'
+                          ? LOCKED_SPLASH_TOKENS.male.canvas
+                          : '#F1EDE6',
+                      color: LOCKED_SPLASH_TOKENS.male.primaryInk,
+                    }}
+                    className="min-h-[54px] rounded-[18px] px-4 flex items-center justify-between font-display font-bold text-[15px] transition-colors"
+                  >
+                    <span>Him</span>
+                    {genderTheme === 'male' && <CheckIcon className="w-4 h-4" />}
+                  </button>
+                </div>
+                {fieldErrors.genderTheme && (
+                  <p className="mt-1 text-[12px] text-[#9E472A]">{fieldErrors.genderTheme}</p>
+                )}
+              </div>
+
+              {/* Required Terms & Conditions */}
+              <div>
+                <label className="flex items-start gap-3 cursor-pointer py-1">
+                  <input
+                    type="checkbox"
+                    checked={acceptedTerms}
+                    onChange={(e) => setAcceptedTerms(e.target.checked)}
+                    className="mt-0.5 h-5 w-5 accent-[#1A1113] rounded"
+                  />
+                  <span className="text-[13px] leading-snug text-[#1A1113]/75">
+                    I agree to the Couply Terms &amp; Conditions and Privacy Policy.
+                  </span>
+                </label>
+                {fieldErrors.acceptedTerms && (
+                  <p className="mt-1 text-[12px] text-[#9E472A]">{fieldErrors.acceptedTerms}</p>
+                )}
+              </div>
+
+              <button
+                type="submit"
+                disabled={submitting}
+                className="w-full min-h-[52px] rounded-full bg-[#1A1113] text-[#FAF8F5] font-display font-bold text-[15px] tracking-tight active:scale-[0.985] transition-transform disabled:opacity-60"
+              >
+                {submitting ? 'Creating Account...' : 'Create Account & Send 6-Digit Code'}
+              </button>
+            </motion.form>
+          )}
+
+          {step === 'verify-otp' && (
+            <motion.form
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.18 }}
+              onSubmit={handleVerifyOtp}
+              className="space-y-5"
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  setStep(otpPurpose === 'signup' ? 'signup' : 'login');
+                  setError(null);
+                }}
+                className="inline-flex items-center gap-2 min-h-[44px] text-[14px] font-medium text-[#1A1113]/70 hover:text-[#1A1113]"
+              >
+                <BackArrowIcon className="w-4 h-4" />
+                <span>Back</span>
+              </button>
+
+              <div>
+                <h2 className="font-display text-[28px] font-extrabold tracking-[-0.03em] text-[#1A1113]">
+                  Enter 6-digit code
+                </h2>
+                <p className="mt-1.5 text-[14px] text-[#1A1113]/65">
+                  Sent to <span className="font-medium text-[#1A1113]">{otpEmail}</span>. Expires in 10 minutes (max 3 attempts).
+                </p>
+              </div>
+
+              {devOtpPreview && (
+                <div
+                  data-testid="dev-otp-preview"
+                  className="rounded-[18px] bg-[#B8D0E8]/55 px-4 py-3 text-[13px] text-[#0F1924]"
+                >
+                  Preview mode (no email secret configured) — your code is{' '}
+                  <strong className="font-display tracking-widest tabular-nums">
+                    {devOtpPreview}
+                  </strong>
+                </div>
+              )}
+
+              <div>
+                <label htmlFor="otp-code-input" className="block text-[13px] font-medium text-[#1A1113]/75 mb-1.5">
+                  6-Digit Verification Code
+                </label>
+                <input
+                  id="otp-code-input"
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={6}
+                  value={otpCode}
+                  onChange={(e) => setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  placeholder="000000"
+                  className="w-full min-h-[56px] rounded-[18px] bg-[#F1EDE6] px-4 text-center font-display text-[28px] font-bold tracking-[0.35em] tabular-nums text-[#1A1113] placeholder:text-[#1A1113]/25 focus:outline-2 focus:outline-[#1A1113]"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={submitting}
+                className="w-full min-h-[52px] rounded-full bg-[#1A1113] text-[#FAF8F5] font-display font-bold text-[15px] tracking-tight active:scale-[0.985] transition-transform disabled:opacity-60"
+              >
+                {submitting ? 'Verifying...' : 'Verify & Enter Couply'}
+              </button>
+
+              <div className="flex items-center justify-between pt-1">
+                <span className="text-[13px] text-[#1A1113]/60 tabular-nums">
+                  {cooldown > 0 ? `Resend available in ${cooldown}s` : 'Did not receive a code?'}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleResendOtp}
+                  disabled={cooldown > 0 || submitting}
+                  className="min-h-[44px] px-3 text-[14px] font-medium text-[#1A1113] disabled:opacity-40"
+                >
+                  Resend Code
+                </button>
+              </div>
+            </motion.form>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
