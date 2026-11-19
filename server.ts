@@ -23,8 +23,8 @@ import {
   verifySecret,
 } from './src/services/security';
 import {
+  getDatabaseHealth,
   initDatabase,
-  isExternalDatabaseConfigured,
   loadDatabase,
   mutateDatabase,
   type CouplyDatabase,
@@ -61,6 +61,22 @@ const VALID_DECK_IDS = new Set<string>(GAME_DECKS.map((deck) => deck.id));
 
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL?.trim() || 'daveking248@gmail.com').toLowerCase();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD?.trim() || '';
+
+function resolveGoogleClientId(): string | null {
+  const raw = (
+    process.env.GOOGLE_CLIENT_ID ||
+    process.env.VITE_GOOGLE_CLIENT_ID ||
+    ''
+  ).trim();
+  const clean =
+    (raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))
+      ? raw.slice(1, -1).trim()
+      : raw;
+  if (!clean || clean.includes('xxxxxxxxxxxx')) {
+    return null;
+  }
+  return clean;
+}
 
 function sanitizePlainText(input: string, maxLen: number): string {
   return input
@@ -457,7 +473,21 @@ async function createApp() {
   app.use('/api/admin/auth', authRateLimiter);
 
   app.get('/api/health', (_req, res) => {
-    res.json({ status: 'ok', service: 'couplova-api', timestamp: new Date().toISOString() });
+    const dbHealth = getDatabaseHealth();
+    res.json({
+      status: 'ok',
+      service: 'couplova-api',
+      timestamp: new Date().toISOString(),
+      database: dbHealth,
+    });
+  });
+
+  app.get('/api/auth/public-config', (_req, res) => {
+    const googleClientId = resolveGoogleClientId();
+    res.json({
+      googleClientId,
+      googleOAuthConfigured: Boolean(googleClientId),
+    });
   });
 
   // 1. Signup (atomic check + OTP cooldown validation before creating/updating unverified record)
@@ -993,7 +1023,7 @@ async function createApp() {
   // 5. Google Sign-In Verification, Auto-Linking & New User Profile Completion Prompt
   app.post('/api/auth/google', async (req, res) => {
     const { idToken } = req.body ?? {};
-    const expectedClientId = process.env.GOOGLE_CLIENT_ID?.trim();
+    const expectedClientId = resolveGoogleClientId();
 
     if (!expectedClientId) {
       res.status(503).json({
@@ -1824,7 +1854,8 @@ async function createApp() {
     const resendConfigured = Boolean(
       resendKey && resendKey.startsWith('re_') && !resendKey.includes('xxxx'),
     );
-    const googleOAuthConfigured = Boolean(process.env.GOOGLE_CLIENT_ID?.trim());
+    const googleOAuthConfigured = Boolean(resolveGoogleClientId());
+    const dbHealth = getDatabaseHealth();
 
     res.json({
       adminEmail: req.adminAuth?.email || ADMIN_EMAIL,
@@ -1844,9 +1875,11 @@ async function createApp() {
       otpEvents,
       system: {
         environment: IS_PROD ? 'production' : 'development',
-        databaseMode: isExternalDatabaseConfigured()
-          ? 'PostgreSQL (Persistent)'
-          : 'Local JSON (.data/couply-db.json)',
+        databaseMode: dbHealth.connected
+          ? `PostgreSQL (${dbHealth.host ?? 'connected'})`
+          : dbHealth.configured
+            ? `PostgreSQL Fallback (${dbHealth.lastError || 'local JSON active'})`
+            : 'Local JSON (.data/couply-db.json)',
         gmailSmtpConfigured,
         resendConfigured,
         googleOAuthConfigured,

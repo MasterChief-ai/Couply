@@ -238,7 +238,16 @@ export interface AdminOverviewResponse {
   };
 }
 
+export interface PublicAuthConfig {
+  googleClientId: string | null;
+  googleOAuthConfigured: boolean;
+}
+
 export const couplyApi = {
+  getPublicConfig() {
+    return apiFetch<PublicAuthConfig>('/api/auth/public-config');
+  },
+
   signup(payload: {
     fullName: string;
     username: string;

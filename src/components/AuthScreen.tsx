@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { ApiError, couplyApi, type OtpChallengeResponse } from '../services/api';
 import { LOCKED_SPLASH_TOKENS, type GenderTheme } from '../constants/theme';
 import type { CouplyUser } from '../services/storage';
+import { loadGoogleIdentityServices, type GoogleAccountsId } from '../utils/googleGsi';
 import {
   OTP_RESEND_COOLDOWN_SECONDS,
   getPasswordErrorMessage,
@@ -62,6 +63,11 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
   const [devOtpPreview, setDevOtpPreview] = useState<string | null>(null);
   const [loginEmailTouched, setLoginEmailTouched] = useState(false);
   const [signupEmailTouched, setSignupEmailTouched] = useState(false);
+  const [resolvedGoogleClientId, setResolvedGoogleClientId] = useState<string | null>(
+    import.meta.env.VITE_GOOGLE_CLIENT_ID || null,
+  );
+  const [showGoogleFallbackButton, setShowGoogleFallbackButton] = useState(false);
+  const googleFallbackRef = useRef<HTMLDivElement | null>(null);
 
   const loginEmailValid = isValidEmail(loginEmail);
   const signupEmailValid = isValidEmail(signupEmail);
@@ -102,6 +108,26 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
     }, 1000);
     return () => window.clearInterval(timer);
   }, [cooldown]);
+
+  useEffect(() => {
+    let active = true;
+    void loadGoogleIdentityServices();
+    if (!resolvedGoogleClientId) {
+      couplyApi
+        .getPublicConfig()
+        .then((cfg) => {
+          if (active && cfg.googleClientId) {
+            setResolvedGoogleClientId(cfg.googleClientId);
+          }
+        })
+        .catch(() => {
+          // Ignore network error during background config prefetch
+        });
+    }
+    return () => {
+      active = false;
+    };
+  }, [resolvedGoogleClientId]);
 
   function handleOtpChallenge(res: OtpChallengeResponse) {
     setOtpEmail(res.email);
@@ -239,37 +265,56 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
     }
   }
 
+  function renderGooglePopupFallback(googleAccounts: GoogleAccountsId) {
+    setShowGoogleFallbackButton(true);
+    window.requestAnimationFrame(() => {
+      const host = googleFallbackRef.current;
+      if (!host) return;
+      host.innerHTML = '';
+      googleAccounts.renderButton(host, {
+        theme: 'outline',
+        size: 'large',
+        shape: 'pill',
+        text: step === 'signup' ? 'signup_with' : 'continue_with',
+        width: Math.min(360, host.clientWidth || 320),
+      });
+    });
+  }
+
   async function handleGoogleSignIn() {
     setError(null);
-    const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+    let googleClientId =
+      resolvedGoogleClientId || import.meta.env.VITE_GOOGLE_CLIENT_ID || null;
+
+    if (!googleClientId) {
+      try {
+        const cfg = await couplyApi.getPublicConfig();
+        if (cfg.googleClientId) {
+          googleClientId = cfg.googleClientId;
+          setResolvedGoogleClientId(cfg.googleClientId);
+        }
+      } catch {
+        // Fall through to missing config message
+      }
+    }
+
     if (!googleClientId) {
       setError(
-        'Google Sign-In needs VITE_GOOGLE_CLIENT_ID and GOOGLE_CLIENT_ID in environment secrets.',
+        'Google Sign-In needs GOOGLE_CLIENT_ID (or VITE_GOOGLE_CLIENT_ID) in environment secrets.',
       );
       return;
     }
 
-    const googleAccounts = (window as unknown as {
-      google?: {
-        accounts?: {
-          id?: {
-            initialize: (cfg: {
-              client_id: string;
-              callback: (resp: { credential?: string }) => void;
-            }) => void;
-            prompt: () => void;
-          };
-        };
-      };
-    }).google?.accounts?.id;
-
+    const googleAccounts = await loadGoogleIdentityServices();
     if (!googleAccounts) {
-      setError('Google Identity Services script is unavailable.');
+      setError('Unable to load Google Identity Services. Check your connection and try again.');
       return;
     }
 
     googleAccounts.initialize({
       client_id: googleClientId,
+      ux_mode: 'popup',
+      use_fedcm_for_prompt: true,
       callback: async (response: { credential?: string }) => {
         if (!response.credential) return;
         setSubmitting(true);
@@ -285,6 +330,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
             setGooglePartnerName('');
             setGoogleDob('');
             setGoogleAcceptedTerms(false);
+            setShowGoogleFallbackButton(false);
             setError(null);
             setNotice(null);
             setStep('google-complete');
@@ -298,7 +344,9 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
         }
       },
     });
+
     googleAccounts.prompt();
+    renderGooglePopupFallback(googleAccounts);
   }
 
   async function handleCompleteGoogleProfile(e: React.FormEvent) {
@@ -393,6 +441,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
                   setError(null);
                   setOfferLoginForEmail(null);
                   setFieldErrors({});
+                  setShowGoogleFallbackButton(false);
                 }}
                 className={`flex-1 min-h-[44px] rounded-full text-[14px] font-medium transition-colors ${
                   step === 'login'
@@ -409,6 +458,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
                   setError(null);
                   setOfferLoginForEmail(null);
                   setFieldErrors({});
+                  setShowGoogleFallbackButton(false);
                 }}
                 className={`flex-1 min-h-[44px] rounded-full text-[14px] font-medium transition-colors ${
                   step === 'signup'
@@ -527,6 +577,15 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
                     <GoogleLogoIcon className="w-[18px] h-[18px]" />
                     <span>Continue with Google</span>
                   </button>
+
+                  {showGoogleFallbackButton && (
+                    <div className="rounded-[18px] bg-[#F1EDE6] p-3 flex flex-col items-center gap-2">
+                      <p className="text-[12px] text-[#1A1113]/65 text-center">
+                        Tap Google&apos;s secure popup button below to finish signing in:
+                      </p>
+                      <div ref={googleFallbackRef} className="w-full flex justify-center" />
+                    </div>
+                  )}
 
                   <button
                     type="button"
@@ -781,6 +840,27 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
               >
                 {submitting ? 'Creating Account...' : 'Create Account'}
               </button>
+
+              <div className="pt-1 space-y-3">
+                <button
+                  type="button"
+                  onClick={handleGoogleSignIn}
+                  disabled={submitting}
+                  className="w-full min-h-[48px] rounded-full bg-[#F1EDE6] text-[#1A1113] font-medium text-[14px] hover:bg-[#E7E1D8] transition-colors flex items-center justify-center gap-2.5"
+                >
+                  <GoogleLogoIcon className="w-[18px] h-[18px]" />
+                  <span>Continue with Google</span>
+                </button>
+
+                {showGoogleFallbackButton && (
+                  <div className="rounded-[18px] bg-[#F1EDE6] p-3 flex flex-col items-center gap-2">
+                    <p className="text-[12px] text-[#1A1113]/65 text-center">
+                      Tap Google&apos;s secure popup button below to continue:
+                    </p>
+                    <div ref={googleFallbackRef} className="w-full flex justify-center" />
+                  </div>
+                )}
+              </div>
             </motion.form>
             )}
           </AnimatePresence>

@@ -16,10 +16,12 @@ import {
   verifySecret,
 } from './security';
 import {
+  getDatabaseHealth,
   initDatabase,
   isExternalDatabaseConfigured,
   mutateDatabase,
   resetStoreCacheForTests,
+  resolveExternalDatabaseUrl,
 } from './store';
 
 test('timingSafeStringEqual handles equal strings, mismatched lengths, and mismatched characters', () => {
@@ -72,20 +74,37 @@ test('JWT signing/verification enforces tokenType isolation, expiry, length boun
   assert.equal(verifyAccessToken(`${parts[0]}.${tamperedPayload}.${parts[2]}`), null);
 });
 
-test('isExternalDatabaseConfigured rejects placeholder strings and accepts valid postgres URIs', () => {
+test('isExternalDatabaseConfigured & resolveExternalDatabaseUrl handle placeholders, quotes, and aliases', () => {
   const prev = process.env.DATABASE_URL;
+  const prevPg = process.env.POSTGRES_URL;
+  const prevSupa = process.env.SUPABASE_DB_URL;
   try {
     delete process.env.DATABASE_URL;
+    delete process.env.POSTGRES_URL;
+    delete process.env.SUPABASE_DB_URL;
     assert.equal(isExternalDatabaseConfigured(), false);
+    assert.equal(getDatabaseHealth().configured, false);
 
     process.env.DATABASE_URL = 'postgresql://postgres:[YOUR-PASSWORD]@db.[YOUR-PROJECT-REF].supabase.co:5432/postgres';
     assert.equal(isExternalDatabaseConfigured(), false);
 
-    process.env.DATABASE_URL = 'postgresql://couplova:realpass@db.example.com:5432/couplova';
+    process.env.DATABASE_URL = '"postgresql://couplova:realpass@db.example.com:5432/couplova?sslmode=require"';
+    assert.equal(isExternalDatabaseConfigured(), true);
+    assert.equal(
+      resolveExternalDatabaseUrl(),
+      'postgresql://couplova:realpass@db.example.com:5432/couplova?sslmode=require',
+    );
+
+    delete process.env.DATABASE_URL;
+    process.env.SUPABASE_DB_URL = 'postgres://user:pw@aws-0.pooler.supabase.com:6543/postgres';
     assert.equal(isExternalDatabaseConfigured(), true);
   } finally {
     if (prev === undefined) delete process.env.DATABASE_URL;
     else process.env.DATABASE_URL = prev;
+    if (prevPg === undefined) delete process.env.POSTGRES_URL;
+    else process.env.POSTGRES_URL = prevPg;
+    if (prevSupa === undefined) delete process.env.SUPABASE_DB_URL;
+    else process.env.SUPABASE_DB_URL = prevSupa;
   }
 });
 

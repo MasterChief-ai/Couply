@@ -94,13 +94,66 @@ function getBackupFilePath(dbPath: string): string {
   return `${dbPath}.bak`;
 }
 
-export function isExternalDatabaseConfigured(): boolean {
-  const url = process.env.DATABASE_URL?.trim();
-  if (!url) return false;
-  if (url.includes('[YOUR-PASSWORD]') || url.includes('[YOUR-PROJECT-REF]')) {
-    return false;
+function stripOuterQuotes(value: string): string {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1).trim();
   }
-  return url.startsWith('postgres://') || url.startsWith('postgresql://');
+  return trimmed;
+}
+
+export function resolveExternalDatabaseUrl(): string | null {
+  const raw =
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_URL ||
+    process.env.SUPABASE_DB_URL ||
+    '';
+  const url = stripOuterQuotes(raw);
+  if (!url) return null;
+  if (url.includes('[YOUR-PASSWORD]') || url.includes('[YOUR-PROJECT-REF]')) {
+    return null;
+  }
+  if (!url.startsWith('postgres://') && !url.startsWith('postgresql://')) {
+    return null;
+  }
+  return url;
+}
+
+export function isExternalDatabaseConfigured(): boolean {
+  return resolveExternalDatabaseUrl() !== null;
+}
+
+export interface DatabaseHealth {
+  mode: 'postgresql' | 'local-json';
+  configured: boolean;
+  connected: boolean;
+  host: string | null;
+  lastError: string | null;
+}
+
+let pgHealthState: DatabaseHealth = {
+  mode: 'local-json',
+  configured: false,
+  connected: false,
+  host: null,
+  lastError: null,
+};
+
+export function getDatabaseHealth(): DatabaseHealth {
+  const url = resolveExternalDatabaseUrl();
+  if (!url) {
+    return {
+      mode: 'local-json',
+      configured: false,
+      connected: false,
+      host: null,
+      lastError: null,
+    };
+  }
+  return { ...pgHealthState, configured: true };
 }
 
 export function createSeedDatabase(): CouplyDatabase {
@@ -304,20 +357,58 @@ let mutationQueue: Promise<unknown> = Promise.resolve();
 let pgPool: Pool | null = null;
 let pgInitialized = false;
 
-function getPgPool(): Pool | null {
-  if (!isExternalDatabaseConfigured()) return null;
+function describePgError(err: unknown, host: string | null): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (
+    (msg.includes('ENETUNREACH') || msg.includes('EAI_AGAIN') || msg.includes('ENOTFOUND')) &&
+    host &&
+    /^db\.[^.]+\.supabase\.co$/i.test(host)
+  ) {
+    return 'Supabase direct host (db.*.supabase.co) requires IPv6; switch DATABASE_URL to the Supabase Session/Transaction Pooler URI (*.pooler.supabase.com).';
+  }
+  return msg.slice(0, 220);
+}
+
+function getPgPool(): { pool: Pool; host: string | null } | null {
+  const connString = resolveExternalDatabaseUrl();
+  if (!connString) return null;
+
+  let parsedHost: string | null = null;
+  let cleanedUrl = connString;
+  let useSsl = !connString.includes('localhost') && !connString.includes('127.0.0.1');
+
+  try {
+    const u = new URL(connString);
+    parsedHost = u.hostname || null;
+    if (parsedHost === 'localhost' || parsedHost === '127.0.0.1') {
+      useSsl = false;
+    }
+    // Strip sslmode from URL so pg-connection-string does not override rejectUnauthorized: false
+    if (u.searchParams.has('sslmode')) {
+      u.searchParams.delete('sslmode');
+      cleanedUrl = u.toString();
+    }
+  } catch {
+    // Keep raw connection string if URL parsing fails
+  }
+
   if (!pgPool) {
-    const connString = process.env.DATABASE_URL!.trim();
-    const useSsl = !connString.includes('localhost') && !connString.includes('127.0.0.1');
     pgPool = new Pool({
-      connectionString: connString,
+      connectionString: cleanedUrl,
       max: 5,
       idleTimeoutMillis: 15_000,
       connectionTimeoutMillis: 8_000,
       ...(useSsl ? { ssl: { rejectUnauthorized: false } } : {}),
     });
+    pgHealthState = {
+      mode: 'local-json',
+      configured: true,
+      connected: false,
+      host: parsedHost,
+      lastError: null,
+    };
   }
-  return pgPool;
+  return { pool: pgPool, host: parsedHost };
 }
 
 async function ensurePgTable(pool: Pool): Promise<void> {
@@ -333,11 +424,19 @@ async function ensurePgTable(pool: Pool): Promise<void> {
 }
 
 async function hydrateFromPgOrLocal(dbPath: string): Promise<CouplyDatabase> {
-  const pool = getPgPool();
-  if (!pool) {
+  const pgInfo = getPgPool();
+  if (!pgInfo) {
+    pgHealthState = {
+      mode: 'local-json',
+      configured: false,
+      connected: false,
+      host: null,
+      lastError: null,
+    };
     return readDbFromDisk(dbPath);
   }
 
+  const { pool, host } = pgInfo;
   try {
     await ensurePgTable(pool);
     const res = await pool.query<{ payload: Partial<CouplyDatabase> }>(
@@ -347,6 +446,14 @@ async function hydrateFromPgOrLocal(dbPath: string): Promise<CouplyDatabase> {
     if (res.rows.length > 0 && res.rows[0].payload) {
       const normalized = normalizeDatabaseShape(res.rows[0].payload);
       writeDbAtomic(normalized, dbPath);
+      pgHealthState = {
+        mode: 'postgresql',
+        configured: true,
+        connected: true,
+        host,
+        lastError: null,
+      };
+      console.log(`[Couplova Store] PostgreSQL connected (${host ?? 'remote'}) — ${normalized.users.length} users hydrated.`);
       return normalized;
     }
 
@@ -358,11 +465,27 @@ async function hydrateFromPgOrLocal(dbPath: string): Promise<CouplyDatabase> {
        ON CONFLICT (id) DO NOTHING`,
       ['main', JSON.stringify(initial)],
     );
+    pgHealthState = {
+      mode: 'postgresql',
+      configured: true,
+      connected: true,
+      host,
+      lastError: null,
+    };
+    console.log(`[Couplova Store] PostgreSQL initialized (${host ?? 'remote'}) with ${initial.users.length} users.`);
     return initial;
   } catch (err) {
+    const safeError = describePgError(err, host);
+    pgHealthState = {
+      mode: 'local-json',
+      configured: true,
+      connected: false,
+      host,
+      lastError: safeError,
+    };
     console.warn(
       '[Couplova Store] PostgreSQL unavailable, falling back to local disk store:',
-      err instanceof Error ? err.message : String(err),
+      safeError,
     );
     return readDbFromDisk(dbPath);
   }
@@ -372,9 +495,10 @@ async function persistToPgAndDisk(db: CouplyDatabase, dbPath: string): Promise<v
   pruneExpiredTokens(db);
   writeDbAtomic(db, dbPath);
 
-  const pool = getPgPool();
-  if (!pool) return;
+  const pgInfo = getPgPool();
+  if (!pgInfo) return;
 
+  const { pool, host } = pgInfo;
   try {
     await ensurePgTable(pool);
     await pool.query(
@@ -384,10 +508,25 @@ async function persistToPgAndDisk(db: CouplyDatabase, dbPath: string): Promise<v
        SET payload = EXCLUDED.payload, updated_at = NOW()`,
       ['main', JSON.stringify(db)],
     );
+    pgHealthState = {
+      mode: 'postgresql',
+      configured: true,
+      connected: true,
+      host,
+      lastError: null,
+    };
   } catch (err) {
+    const safeError = describePgError(err, host);
+    pgHealthState = {
+      mode: 'local-json',
+      configured: true,
+      connected: false,
+      host,
+      lastError: safeError,
+    };
     console.warn(
       '[Couplova Store] PostgreSQL write warning (local backup saved):',
-      err instanceof Error ? err.message : String(err),
+      safeError,
     );
   }
 }
@@ -396,6 +535,18 @@ export function resetStoreCacheForTests(): void {
   activeDbPath = null;
   cachedDb = null;
   mutationQueue = Promise.resolve();
+  pgInitialized = false;
+  if (pgPool) {
+    void pgPool.end().catch(() => {});
+    pgPool = null;
+  }
+  pgHealthState = {
+    mode: 'local-json',
+    configured: false,
+    connected: false,
+    host: null,
+    lastError: null,
+  };
 }
 
 export async function initDatabase(): Promise<CouplyDatabase> {
