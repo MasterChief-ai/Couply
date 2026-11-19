@@ -6,6 +6,8 @@ import html
 import os
 import re
 import secrets
+import smtplib
+from email.mime.text import MIMEText
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
@@ -23,7 +25,9 @@ from pydantic import BaseModel, EmailStr
 DATABASE_URL = os.environ["DATABASE_URL"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-OTP_FROM_EMAIL = os.getenv("OTP_FROM_EMAIL", "Couply <noreply@couply.app>")
+OTP_FROM_EMAIL = os.getenv("OTP_FROM_EMAIL", "Couply <onboarding@resend.dev>")
+GMAIL_SMTP_USER = os.getenv("GMAIL_SMTP_USER", "")
+GMAIL_SMTP_APP_PASSWORD = os.getenv("GMAIL_SMTP_APP_PASSWORD", "").replace(" ", "")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 ALLOWED_ORIGINS = [
     origin.strip()
@@ -87,6 +91,27 @@ async def dispatch_otp_email(email: str, code: str, purpose: str = "signup") -> 
         )
         ignore = "If you didn't request this, you can safely ignore this email."
 
+    html_body = (
+        f"<div style='font-family:sans-serif;padding:32px 24px;max-width:540px;color:#1A1113;background:#fff;'>"
+        f"<h1 style='font-size:24px;margin:0 0 16px;'>{heading}</h1>"
+        f"<p style='font-size:15px;line-height:1.6;'>{body}</p>"
+        f"<div style='font-size:30px;font-weight:700;letter-spacing:6px;margin:20px 0;'>{safe_code}</div>"
+        f"<p style='font-size:13px;color:#666;'>Expires in 10 minutes. {ignore}</p></div>"
+    )
+
+    if GMAIL_SMTP_USER and GMAIL_SMTP_APP_PASSWORD and (not RESEND_API_KEY or "onboarding@resend.dev" in OTP_FROM_EMAIL):
+        msg = MIMEText(html_body, "html")
+        msg["Subject"] = subject
+        msg["From"] = f"Couply <{GMAIL_SMTP_USER}>"
+        msg["To"] = email
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=8) as server:
+            server.login(GMAIL_SMTP_USER, GMAIL_SMTP_APP_PASSWORD)
+            server.sendmail(GMAIL_SMTP_USER, [email], msg.as_string())
+        return
+
+    if not RESEND_API_KEY:
+        return
+
     async with httpx.AsyncClient(timeout=8.0) as client:
         await client.post(
             "https://api.resend.com/emails",
@@ -95,13 +120,7 @@ async def dispatch_otp_email(email: str, code: str, purpose: str = "signup") -> 
                 "from": OTP_FROM_EMAIL,
                 "to": [email],
                 "subject": subject,
-                "html": (
-                    f"<div style='font-family:sans-serif;padding:32px 24px;max-width:540px;color:#1A1113;background:#fff;'>"
-                    f"<h1 style='font-size:24px;margin:0 0 16px;'>{heading}</h1>"
-                    f"<p style='font-size:15px;line-height:1.6;'>{body}</p>"
-                    f"<div style='font-size:30px;font-weight:700;letter-spacing:6px;margin:20px 0;'>{safe_code}</div>"
-                    f"<p style='font-size:13px;color:#666;'>Expires in 10 minutes. {ignore}</p></div>"
-                ),
+                "html": html_body,
             },
         )
 

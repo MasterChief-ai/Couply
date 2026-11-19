@@ -128,7 +128,7 @@ export interface OtpChallengeResponse {
   email: string;
   purpose: 'signup' | 'login';
   cooldownSeconds: number;
-  deliveredVia: 'resend' | 'preview';
+  deliveredVia: 'resend' | 'gmail' | 'preview';
   devOtpPreview?: string;
 }
 

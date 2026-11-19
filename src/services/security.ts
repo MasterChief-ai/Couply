@@ -7,12 +7,9 @@ function resolveJwtSecret(): string {
   if (envSecret && envSecret.length >= 16) {
     return envSecret;
   }
-  if (process.env.NODE_ENV === 'production') {
-    throw new Error('JWT_SECRET environment variable must be set (min 16 chars) in production.');
-  }
 
-  // In development/test, generate and persist a random 256-bit CSPRNG secret
-  // instead of deriving a predictable secret from process.cwd().
+  // Generate and persist a random 256-bit CSPRNG secret in .data/jwt.secret (0600)
+  // rather than deriving a predictable secret or crashing when JWT_SECRET isn't set.
   const dataDir = path.resolve(process.cwd(), '.data');
   const secretPath = path.join(dataDir, 'jwt.secret');
   try {

@@ -172,8 +172,9 @@ async function sendOtpEmail(params: {
   code: string;
   purpose: 'signup' | 'login';
 }): Promise<{
-  deliveredVia: 'resend' | 'preview';
+  deliveredVia: 'resend' | 'gmail' | 'preview';
   providerFailed?: boolean;
+  providerError?: string;
   devOtpPreview?: string;
 }> {
   const appUrl = resolveAppUrl();
@@ -201,18 +202,22 @@ async function sendOtpEmail(params: {
     html: template.html,
   });
 
-  if (dispatch.deliveredVia === 'resend') {
-    return { deliveredVia: 'resend' };
+  if (dispatch.deliveredVia === 'resend' || dispatch.deliveredVia === 'gmail') {
+    return { deliveredVia: dispatch.deliveredVia };
   }
 
   if (IS_PROD) {
-    return { deliveredVia: 'preview', providerFailed: true };
+    const detail = dispatch.providerMessage
+      ? `Email delivery failed (${dispatch.providerMessage}).`
+      : 'Email delivery is not configured (set GMAIL_SMTP_USER + GMAIL_SMTP_APP_PASSWORD, or RESEND_API_KEY + verified OTP_FROM_EMAIL).';
+    return { deliveredVia: 'preview', providerFailed: true, providerError: detail };
   }
 
   // Only expose preview OTP in non-production dev/preview environments
   return {
     deliveredVia: 'preview',
     devOtpPreview: params.code,
+    ...(dispatch.providerMessage ? { providerError: dispatch.providerMessage } : {}),
   };
 }
 
@@ -531,7 +536,11 @@ async function createApp() {
     });
 
     if (delivery.providerFailed) {
-      res.status(502).json({ error: 'Unable to send confirmation email right now. Please try again.' });
+      res.status(502).json({
+        error:
+          delivery.providerError ||
+          'Unable to send confirmation email right now. Please try again.',
+      });
       return;
     }
 
@@ -613,7 +622,11 @@ async function createApp() {
     });
 
     if (delivery.providerFailed) {
-      res.status(502).json({ error: 'Unable to send sign-in confirmation email right now.' });
+      res.status(502).json({
+        error:
+          delivery.providerError ||
+          'Unable to send sign-in confirmation email right now.',
+      });
       return;
     }
 
@@ -663,7 +676,11 @@ async function createApp() {
     });
 
     if (delivery.providerFailed) {
-      res.status(502).json({ error: 'Unable to resend verification email right now.' });
+      res.status(502).json({
+        error:
+          delivery.providerError ||
+          'Unable to resend verification email right now.',
+      });
       return;
     }
 

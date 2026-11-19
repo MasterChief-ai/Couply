@@ -1,3 +1,4 @@
+import nodemailer from 'nodemailer';
 import { OTP_TTL_MINUTES } from './security';
 
 export interface EmailTemplatePayload {
@@ -223,15 +224,87 @@ export function buildLoginOtpEmailTemplate(params: {
   };
 }
 
+async function sendViaGmailSmtp(params: {
+  to: string;
+  subject: string;
+  html: string;
+}): Promise<{ ok: boolean; errorMessage?: string }> {
+  const gmailUser = process.env.GMAIL_SMTP_USER?.trim();
+  const gmailAppPassword = process.env.GMAIL_SMTP_APP_PASSWORD?.replace(/\s+/g, '');
+  if (!gmailUser || !gmailAppPassword) {
+    return { ok: false };
+  }
+
+  try {
+    const transporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 465,
+      secure: true,
+      auth: {
+        user: gmailUser,
+        pass: gmailAppPassword,
+      },
+      connectionTimeout: 8000,
+      greetingTimeout: 8000,
+      socketTimeout: 10000,
+    });
+
+    await transporter.sendMail({
+      from: `Couply <${sanitizeHeaderText(gmailUser)}>`,
+      to: sanitizeHeaderText(params.to),
+      subject: sanitizeHeaderText(params.subject),
+      html: params.html,
+    });
+
+    return { ok: true };
+  } catch (err) {
+    const errorMessage =
+      err instanceof Error ? err.message.slice(0, 180) : 'Gmail SMTP send failed';
+    console.warn('[Couply Email] Gmail SMTP failed:', errorMessage);
+    return { ok: false, errorMessage };
+  }
+}
+
 export async function dispatchTransactionalEmail(params: {
   to: string;
   subject: string;
   html: string;
-}): Promise<{ deliveredVia: 'resend' | 'preview'; providerFailed?: boolean }> {
+}): Promise<{
+  deliveredVia: 'resend' | 'gmail' | 'preview';
+  providerFailed?: boolean;
+  providerStatus?: number;
+  providerMessage?: string;
+  isSandboxSender?: boolean;
+}> {
   const resendKey = process.env.RESEND_API_KEY?.trim();
+  const hasValidResendKey = Boolean(
+    resendKey && resendKey.startsWith('re_') && !resendKey.includes('xxxx'),
+  );
   const fromEmail = process.env.OTP_FROM_EMAIL?.trim() || 'Couply <onboarding@resend.dev>';
+  const isSandboxSender = fromEmail.toLowerCase().includes('onboarding@resend.dev');
+  const hasGmailSmtp = Boolean(
+    process.env.GMAIL_SMTP_USER?.trim() && process.env.GMAIL_SMTP_APP_PASSWORD?.trim(),
+  );
 
-  if (resendKey && resendKey.startsWith('re_') && !resendKey.includes('xxxx')) {
+  // If Gmail SMTP is configured and Resend has no custom verified domain sender,
+  // send via Gmail SMTP directly without failing on Resend's sandbox restriction.
+  if (hasGmailSmtp && (!hasValidResendKey || isSandboxSender)) {
+    const gmailResult = await sendViaGmailSmtp(params);
+    if (gmailResult.ok) {
+      return { deliveredVia: 'gmail', isSandboxSender };
+    }
+    return {
+      deliveredVia: 'preview',
+      providerFailed: true,
+      providerStatus: 502,
+      providerMessage: gmailResult.errorMessage,
+      isSandboxSender,
+    };
+  }
+
+  let resendFailure: { status: number; message: string } | null = null;
+
+  if (hasValidResendKey) {
     try {
       const response = await fetch('https://api.resend.com/emails', {
         method: 'POST',
@@ -249,13 +322,52 @@ export async function dispatchTransactionalEmail(params: {
       });
 
       if (response.ok) {
-        return { deliveredVia: 'resend' };
+        return { deliveredVia: 'resend', isSandboxSender };
       }
-      return { deliveredVia: 'preview', providerFailed: true };
-    } catch {
-      return { deliveredVia: 'preview', providerFailed: true };
+
+      let providerMessage = `Resend returned HTTP ${response.status}`;
+      try {
+        const errBody = (await response.json()) as { message?: string; name?: string };
+        if (errBody?.message) {
+          providerMessage = String(errBody.message).slice(0, 220);
+        }
+      } catch {
+        // Ignore parse failures
+      }
+      console.warn('[Couply Email] Resend rejected send:', response.status, providerMessage);
+      resendFailure = { status: response.status, message: providerMessage };
+    } catch (err) {
+      const providerMessage =
+        err instanceof Error ? err.message.slice(0, 160) : 'Network error reaching Resend';
+      console.warn('[Couply Email] Resend request failed:', providerMessage);
+      resendFailure = { status: 502, message: providerMessage };
     }
   }
 
-  return { deliveredVia: 'preview', providerFailed: false };
+  // Fallback or primary delivery via Gmail SMTP (works without a custom domain)
+  if (hasGmailSmtp) {
+    const gmailResult = await sendViaGmailSmtp(params);
+    if (gmailResult.ok) {
+      return { deliveredVia: 'gmail', isSandboxSender };
+    }
+    return {
+      deliveredVia: 'preview',
+      providerFailed: true,
+      providerStatus: 502,
+      providerMessage: gmailResult.errorMessage || resendFailure?.message,
+      isSandboxSender,
+    };
+  }
+
+  if (resendFailure) {
+    return {
+      deliveredVia: 'preview',
+      providerFailed: true,
+      providerStatus: resendFailure.status,
+      providerMessage: resendFailure.message,
+      isSandboxSender,
+    };
+  }
+
+  return { deliveredVia: 'preview', providerFailed: false, isSandboxSender };
 }
