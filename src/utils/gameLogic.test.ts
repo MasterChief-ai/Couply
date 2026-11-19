@@ -15,6 +15,7 @@ import {
   personalizePrompt,
   prepareDeckForPlay,
   prevCardIndex,
+  resolveCardSwipeDirection,
   suggestIouFromCard,
   THIRTY_DAYS_MS,
   validateSignupForm,
@@ -219,5 +220,21 @@ test('suggestIouFromCard generates personalized default IOU copy', () => {
     suggestIouFromCard(dare, 'Julian'),
     'Kiss Julian slowly for fifteen full seconds without using your hands',
   );
+  const finalCard = GAME_DECKS[4].cards[19];
+  assert.equal(
+    suggestIouFromCard(finalCard, 'Julian'),
+    'Clothes come off, no talking needed',
+  );
 });
+
+test('resolveCardSwipeDirection respects horizontal distance and velocity thresholds', () => {
+  assert.equal(resolveCardSwipeDirection(-80, 0), 'next');
+  assert.equal(resolveCardSwipeDirection(-15, -400), 'next');
+  assert.equal(resolveCardSwipeDirection(80, 0), 'prev');
+  assert.equal(resolveCardSwipeDirection(15, 400), 'prev');
+  assert.equal(resolveCardSwipeDirection(-30, -100), null);
+  assert.equal(resolveCardSwipeDirection(30, 100), null);
+  assert.equal(resolveCardSwipeDirection(0, 0), null);
+});
+
 

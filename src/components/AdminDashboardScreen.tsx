@@ -16,7 +16,7 @@ type AdminTab = 'users' | 'sessions' | 'otps';
 
 function formatTimestamp(iso: string): string {
   const ts = Date.parse(iso);
-  if (Number.isNaN(ts)) return '—';
+  if (Number.isNaN(ts)) return '-';
   return new Date(ts).toLocaleString(undefined, {
     month: 'short',
     day: 'numeric',
@@ -262,7 +262,7 @@ export function AdminDashboardScreen() {
                   data-testid="admin-otp-preview"
                   className="rounded-[16px] bg-[#B8D0E8]/55 px-4 py-3 text-[13px] text-[#0F1924]"
                 >
-                  Preview mode — owner code is{' '}
+                  Preview mode: owner code is{' '}
                   <strong className="font-display tracking-widest tabular-nums">
                     {devOtpPreview}
                   </strong>
@@ -377,31 +377,31 @@ export function AdminDashboardScreen() {
           <div className="rounded-[22px] bg-[#F1EDE6] p-5">
             <p className="text-[12px] font-medium text-[#1A1113]/60">Online Now (2m)</p>
             <p data-testid="admin-stat-online" className="font-display text-[30px] font-extrabold tabular-nums mt-1">
-              {overview ? overview.telemetry.currentlyOnline : '—'}
+              {overview ? overview.telemetry.currentlyOnline : '-'}
             </p>
           </div>
           <div className="rounded-[22px] bg-[#F1EDE6] p-5">
             <p className="text-[12px] font-medium text-[#1A1113]/60">Active Couples (30d)</p>
             <p data-testid="admin-stat-active" className="font-display text-[30px] font-extrabold tabular-nums mt-1">
-              {overview ? overview.telemetry.totalActiveUsers : '—'}
+              {overview ? overview.telemetry.totalActiveUsers : '-'}
             </p>
           </div>
           <div className="rounded-[22px] bg-[#F1EDE6] p-5">
             <p className="text-[12px] font-medium text-[#1A1113]/60">Registered Accounts</p>
             <p className="font-display text-[30px] font-extrabold tabular-nums mt-1">
-              {overview ? overview.telemetry.totalUsers ?? 0 : '—'}
+              {overview ? overview.telemetry.totalUsers ?? 0 : '-'}
             </p>
           </div>
           <div className="rounded-[22px] bg-[#F1EDE6] p-5">
             <p className="text-[12px] font-medium text-[#1A1113]/60">Active Sessions</p>
             <p className="font-display text-[30px] font-extrabold tabular-nums mt-1">
-              {overview ? overview.telemetry.activeSessionsCount ?? 0 : '—'}
+              {overview ? overview.telemetry.activeSessionsCount ?? 0 : '-'}
             </p>
           </div>
           <div className="rounded-[22px] bg-[#F1EDE6] p-5 col-span-2 md:col-span-1">
             <p className="text-[12px] font-medium text-[#1A1113]/60">Saved Cards</p>
             <p className="font-display text-[30px] font-extrabold tabular-nums mt-1">
-              {overview ? overview.telemetry.totalSavedCards ?? 0 : '—'}
+              {overview ? overview.telemetry.totalSavedCards ?? 0 : '-'}
             </p>
           </div>
         </section>
@@ -509,7 +509,7 @@ export function AdminDashboardScreen() {
                         </p>
                         <p className="text-[#1A1113]/65">{u.email}</p>
                       </td>
-                      <td className="py-3 px-4 font-medium">{u.partnerName || '—'}</td>
+                      <td className="py-3 px-4 font-medium">{u.partnerName || '-'}</td>
                       <td className="py-3 px-4">
                         <p className="text-[#1A1113]">{u.authMethod}</p>
                         <p className="text-[12px] text-[#1A1113]/60">
@@ -589,7 +589,7 @@ export function AdminDashboardScreen() {
                               {revokingId === s.id ? 'Revoking...' : 'Revoke'}
                             </button>
                           ) : (
-                            <span className="text-[12px] text-[#1A1113]/40">—</span>
+                            <span className="text-[12px] text-[#1A1113]/40">-</span>
                           )}
                         </td>
                       </tr>

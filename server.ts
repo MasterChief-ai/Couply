@@ -490,6 +490,32 @@ async function createApp() {
     });
   });
 
+  app.get('/api/auth/check-username', async (req, res) => {
+    const raw = typeof req.query.username === 'string' ? req.query.username.trim() : '';
+    if (!/^[a-zA-Z0-9_]{3,24}$/.test(raw)) {
+      res.status(400).json({
+        available: false,
+        error: 'Username must be 3-24 letters, numbers, or underscores.',
+      });
+      return;
+    }
+
+    const db = await initDatabase();
+    const normalized = raw.toLowerCase();
+    const exists = db.users.some(
+      (u) => u.username.toLowerCase() === normalized && u.is_verified,
+    );
+    if (exists) {
+      res.json({
+        available: false,
+        error: 'That username already exists. Please pick another one.',
+      });
+      return;
+    }
+
+    res.json({ available: true });
+  });
+
   // 1. Signup (atomic check + OTP cooldown validation before creating/updating unverified record)
   app.post('/api/auth/signup', async (req, res) => {
     const {
@@ -580,7 +606,7 @@ async function createApp() {
       if (existingVerifiedUsername) {
         return {
           status: 409,
-          error: 'That username is already taken.',
+          error: 'That username already exists. Please pick another one.',
           code: 'USERNAME_TAKEN',
         };
       }
@@ -682,7 +708,7 @@ async function createApp() {
       return;
     }
 
-    const db = loadDatabase();
+    const db = await initDatabase();
     const user = db.users.find((u) => u.email === normalizedEmail);
 
     if (!user) {
@@ -703,7 +729,10 @@ async function createApp() {
 
     if (!verifySecret(password, user.password_hash)) {
       recordFailedLoginAttempt(normalizedEmail);
-      res.status(401).json({ error: 'Incorrect password. Please try again.' });
+      res.status(401).json({
+        error: 'Incorrect password for this account. Please try again.',
+        code: 'INCORRECT_PASSWORD',
+      });
       return;
     }
 
@@ -1187,7 +1216,7 @@ async function createApp() {
       if (usernameExists) {
         return {
           status: 409,
-          error: 'That username is already taken. Choose another one.',
+          error: 'That username already exists. Please pick another one.',
           code: 'USERNAME_TAKEN',
         };
       }
@@ -1688,7 +1717,7 @@ async function createApp() {
     }
 
     res.json({
-      message: 'Preview mode — enter the 6-digit owner code below.',
+      message: 'Preview mode: enter the 6-digit owner code below.',
       email: normalizedEmail,
       cooldownSeconds: OTP_RESEND_COOLDOWN_SECONDS,
       deliveredVia: 'preview',

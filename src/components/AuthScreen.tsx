@@ -62,7 +62,11 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
   const [cooldown, setCooldown] = useState(0);
   const [devOtpPreview, setDevOtpPreview] = useState<string | null>(null);
   const [loginEmailTouched, setLoginEmailTouched] = useState(false);
+  const [loginPasswordError, setLoginPasswordError] = useState<string | null>(null);
   const [signupEmailTouched, setSignupEmailTouched] = useState(false);
+  const [usernameStatus, setUsernameStatus] = useState<'idle' | 'checking' | 'available' | 'taken'>('idle');
+  const [usernameTakenError, setUsernameTakenError] = useState<string | null>(null);
+  const [googleUsernameTakenError, setGoogleUsernameTakenError] = useState<string | null>(null);
   const [resolvedGoogleClientId, setResolvedGoogleClientId] = useState<string | null>(
     import.meta.env.VITE_GOOGLE_CLIENT_ID || null,
   );
@@ -79,6 +83,8 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
   const canCreateAccount = Boolean(
     fullName.trim().length >= 2 &&
       /^[a-zA-Z0-9_]{3,24}$/.test(username.trim()) &&
+      usernameStatus !== 'taken' &&
+      !usernameTakenError &&
       partnerName.trim().length >= 1 &&
       partnerName.trim().length <= 40 &&
       signupEmailValid &&
@@ -89,6 +95,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
   );
   const canCompleteGoogle = Boolean(
     /^[a-zA-Z0-9_]{3,24}$/.test(googleUsername.trim()) &&
+      !googleUsernameTakenError &&
       googlePartnerName.trim().length >= 1 &&
       googlePartnerName.trim().length <= 40 &&
       (!googleDob.trim() || isValidDateOfBirth(googleDob)) &&
@@ -129,6 +136,72 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
     };
   }, [resolvedGoogleClientId]);
 
+  useEffect(() => {
+    const trimmed = username.trim();
+    if (step !== 'signup' || !/^[a-zA-Z0-9_]{3,24}$/.test(trimmed)) {
+      setUsernameStatus('idle');
+      setUsernameTakenError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setUsernameStatus('checking');
+    const timer = window.setTimeout(() => {
+      couplyApi
+        .checkUsername(trimmed)
+        .then((res) => {
+          if (cancelled) return;
+          if (!res.available) {
+            setUsernameStatus('taken');
+            setUsernameTakenError(
+              res.error || 'That username already exists. Please pick another one.',
+            );
+          } else {
+            setUsernameStatus('available');
+            setUsernameTakenError(null);
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setUsernameStatus('idle');
+        });
+    }, 280);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [username, step]);
+
+  useEffect(() => {
+    const trimmed = googleUsername.trim();
+    if (step !== 'google-complete' || !/^[a-zA-Z0-9_]{3,24}$/.test(trimmed)) {
+      setGoogleUsernameTakenError(null);
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      couplyApi
+        .checkUsername(trimmed)
+        .then((res) => {
+          if (cancelled) return;
+          setGoogleUsernameTakenError(
+            res.available
+              ? null
+              : res.error || 'That username already exists. Please pick another one.',
+          );
+        })
+        .catch(() => {
+          if (!cancelled) setGoogleUsernameTakenError(null);
+        });
+    }, 280);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [googleUsername, step]);
+
   function handleOtpChallenge(res: OtpChallengeResponse) {
     setOtpEmail(res.email);
     setOtpPurpose(res.purpose);
@@ -144,6 +217,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
     e.preventDefault();
     setError(null);
     setNotice(null);
+    setLoginPasswordError(null);
     setOfferLoginForEmail(null);
     if (!isValidEmail(loginEmail)) {
       setLoginEmailTouched(true);
@@ -151,6 +225,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
       return;
     }
     if (!loginPassword) {
+      setLoginPasswordError('Enter your password.');
       setError('Enter your password.');
       return;
     }
@@ -163,8 +238,16 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
         setSignupEmail(loginEmail.trim());
         setFieldErrors({});
         setError(null);
-        setNotice("Account doesn't exist yet. Create your Couplova account below.");
+        setLoginPasswordError(null);
+        setNotice("No account exists for that email yet. Create your Couplova account below.");
         setStep('signup');
+      } else if (
+        err instanceof ApiError &&
+        (err.code === 'INCORRECT_PASSWORD' || err.status === 401)
+      ) {
+        const msg = err.message || 'Incorrect password for this account. Please try again.';
+        setLoginPasswordError(msg);
+        setError(msg);
       } else {
         setError(err instanceof Error ? err.message : 'Unable to log in.');
       }
@@ -192,6 +275,11 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
       acceptedTerms,
     });
 
+    if (usernameTakenError) {
+      validation.valid = false;
+      validation.errors.username = usernameTakenError;
+    }
+
     setFieldErrors(validation.errors);
     if (!validation.valid) {
       setError('Please fix the highlighted fields before continuing.');
@@ -216,6 +304,11 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
     } catch (err) {
       if (err instanceof ApiError && err.code === 'EMAIL_ALREADY_EXISTS') {
         setOfferLoginForEmail(signupEmail.trim());
+        setFieldErrors((prev) => ({ ...prev, email: err.message }));
+      } else if (err instanceof ApiError && err.code === 'USERNAME_TAKEN') {
+        setUsernameStatus('taken');
+        setUsernameTakenError(err.message);
+        setFieldErrors((prev) => ({ ...prev, username: err.message }));
       }
       setError(err instanceof Error ? err.message : 'Unable to create account.');
     } finally {
@@ -382,6 +475,9 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
       });
       onAuthenticated(session.user);
     } catch (err) {
+      if (err instanceof ApiError && err.code === 'USERNAME_TAKEN') {
+        setGoogleUsernameTakenError(err.message);
+      }
       setError(err instanceof Error ? err.message : 'Unable to finish setup.');
     } finally {
       setSubmitting(false);
@@ -528,7 +624,11 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
                     type="email"
                     autoComplete="email"
                     value={loginEmail}
-                    onChange={(e) => setLoginEmail(e.target.value)}
+                    onChange={(e) => {
+                      setLoginEmail(e.target.value);
+                      if (error) setError(null);
+                      if (loginPasswordError) setLoginPasswordError(null);
+                    }}
                     onBlur={() => setLoginEmailTouched(true)}
                     placeholder="maya@couplova.app"
                     className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
@@ -549,10 +649,17 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
                     type="password"
                     autoComplete="current-password"
                     value={loginPassword}
-                    onChange={(e) => setLoginPassword(e.target.value)}
+                    onChange={(e) => {
+                      setLoginPassword(e.target.value);
+                      if (loginPasswordError) setLoginPasswordError(null);
+                      if (error) setError(null);
+                    }}
                     placeholder="Enter your password"
                     className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
                   />
+                  {loginPasswordError && (
+                    <p className="mt-1 text-[12px] text-[#9E472A]">{loginPasswordError}</p>
+                  )}
                 </div>
 
                 <button
@@ -642,12 +749,23 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
                     id="signup-username"
                     type="text"
                     value={username}
-                    onChange={(e) => setUsername(e.target.value)}
+                    onChange={(e) => {
+                      setUsername(e.target.value);
+                      if (fieldErrors.username) {
+                        setFieldErrors((prev) => {
+                          const next = { ...prev };
+                          delete next.username;
+                          return next;
+                        });
+                      }
+                    }}
                     placeholder="maya_lin"
                     className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
                   />
-                  {fieldErrors.username && (
-                    <p className="mt-1 text-[12px] text-[#9E472A]">{fieldErrors.username}</p>
+                  {(fieldErrors.username || usernameTakenError) && (
+                    <p className="mt-1 text-[12px] text-[#9E472A]">
+                      {fieldErrors.username || usernameTakenError}
+                    </p>
                   )}
                 </div>
               </div>
@@ -907,6 +1025,9 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
                   placeholder="romeo_juliet"
                   className="w-full min-h-[48px] rounded-[16px] bg-[#F1EDE6] px-4 text-[15px] text-[#1A1113] placeholder:text-[#1A1113]/40 focus:outline-2 focus:outline-[#1A1113]"
                 />
+                {googleUsernameTakenError && (
+                  <p className="mt-1 text-[12px] text-[#9E472A]">{googleUsernameTakenError}</p>
+                )}
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -1037,7 +1158,7 @@ export function AuthScreen({ initialNotice, onAuthenticated }: AuthScreenProps) 
                   data-testid="dev-otp-preview"
                   className="rounded-[18px] bg-[#B8D0E8]/55 px-4 py-3 text-[13px] text-[#0F1924]"
                 >
-                  Preview mode (no email secret configured) — your code is{' '}
+                  Preview mode (no email secret configured): your code is{' '}
                   <strong className="font-display tracking-widest tabular-nums">
                     {devOtpPreview}
                   </strong>

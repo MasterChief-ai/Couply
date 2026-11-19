@@ -82,7 +82,7 @@ function renderCouplovaEmailShell(params: {
                   couplova
                 </div>
                 <p style="margin:0;font-size:12px;line-height:1.5;color:#9A8F92;">
-                  Couplova — For Romeo &amp; Juliet couples deepening love beyond Friday dinner dates.
+                  Couplova: For Romeo &amp; Juliet couples deepening love beyond Friday dinner dates.
                 </p>
               </td>
             </tr>
@@ -159,12 +159,12 @@ export function buildWelcomeEmailTemplate(params: {
       Welcome, ${safeFirst}. Most nights end with tired small talk across a table or scrolling side by side on the couch.
     </p>
     <p style="margin:0;">
-      Couplova is built for the two of you—for Romeo &amp; Juliet nights when the restaurant clears out and you want to ask the questions you never usually say out loud. Put one phone between you and ${safePartner}; all six moods are ready whenever the room gets quiet.
+      Couplova is built for the two of you, for Romeo &amp; Juliet nights when the restaurant clears out and you want to ask the questions you never usually say out loud. Put one phone between you and ${safePartner}; all six moods are ready whenever the room gets quiet.
     </p>
   `;
 
   return {
-    subject: sanitizeHeaderText(`Welcome to Couplova — save the small talk for Friday`),
+    subject: sanitizeHeaderText(`Welcome to Couplova: save the small talk for Friday`),
     html: renderCouplovaEmailShell({
       headingLine1: `You and ${params.partnerName || 'your partner'} are in.`,
       headingLine2: 'One shared phone, six intimate moods.',
@@ -190,7 +190,7 @@ export function buildLoginOtpEmailTemplate(params: {
   const bodyHtml = `
     <p style="margin:0 0 14px;">
       Someone just entered your password to step back into Couplova as
-      <span style="font-weight:600;color:#1A1113;">${safeEmail}</span>—ready to pick up where you and ${safePartner} left off after dinner.
+      <span style="font-weight:600;color:#1A1113;">${safeEmail}</span>, ready to pick up where you and ${safePartner} left off after dinner.
     </p>
     <p style="margin:0;">
       If that was you, confirm your sign-in by entering this 6-digit code within ${expiry} minutes:
@@ -219,7 +219,7 @@ export function buildLoginOtpEmailTemplate(params: {
       bodyHtml,
       otpBlockHtml,
       ignoreLine:
-        "If you're not trying to log in right now, you can safely ignore this email—your account stays locked without this code.",
+        "If you're not trying to log in right now, you can safely ignore this email. Your account stays locked without this code.",
     }),
   };
 }

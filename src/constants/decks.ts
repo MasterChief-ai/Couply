@@ -32,7 +32,7 @@ export const GAME_DECKS: GameDeck[] = [
     indexNumber: '01',
     title: 'Balls Deep Conversations',
     subtitle: '30 Cards · Pass & Play',
-    descriptor: 'The things we only say after midnight—and how well you actually know me.',
+    descriptor: 'The things we only say after midnight, and how well you actually know me.',
     cardColor: '#9E472A',
     textColor: '#FFFFFF',
     mutedTextColor: 'rgba(255, 255, 255, 0.72)',
@@ -291,7 +291,7 @@ export const GAME_DECKS: GameDeck[] = [
         type: 'multiple_choice',
         kicker: 'Count to Three',
         prompt: "Who's most likely to start an argument over where to eat?",
-        options: ['Me', 'You', 'Both of us in the car', 'Neither — we just starve'],
+        options: ['Me', 'You', 'Both of us in the car', 'Neither, we just starve'],
       },
       {
         id: 'wml-02',
@@ -424,7 +424,7 @@ export const GAME_DECKS: GameDeck[] = [
         id: 'wml-23',
         type: 'open',
         kicker: 'Debate',
-        prompt: "Who's most likely to get jealous first — and deny it longest?",
+        prompt: "Who's most likely to get jealous first, and deny it longest?",
       },
       {
         id: 'wml-24',
@@ -724,7 +724,7 @@ export const GAME_DECKS: GameDeck[] = [
     indexNumber: '05',
     title: 'Would You Rather',
     subtitle: '20 Cards · Playful to Steamy',
-    descriptor: 'Two choices, zero middle ground—pick your poison, from cozy nights to risky moves.',
+    descriptor: 'Two choices, zero middle ground. Pick your poison, from cozy nights to risky moves.',
     cardColor: '#B8D0E8',
     textColor: '#0F1924',
     mutedTextColor: 'rgba(15, 25, 36, 0.62)',
@@ -810,7 +810,7 @@ export const GAME_DECKS: GameDeck[] = [
         prompt: 'On a rainy Sunday afternoon, are we…',
         options: [
           'Tangled up under a blanket napping',
-          'Having a marathon movie—and makeout—session',
+          'Having a marathon movie and makeout session',
         ],
       },
       {
@@ -859,8 +859,8 @@ export const GAME_DECKS: GameDeck[] = [
         kicker: 'Steamy & Unfiltered',
         prompt: 'Lights on or off when things get heated?',
         options: [
-          'Lights on—I want to see every second of you',
-          'Dim lighting—just shadows and heavy breathing',
+          'Lights on: I want to see every second of you',
+          'Dim lighting: just shadows and heavy breathing',
         ],
       },
       {
@@ -927,9 +927,9 @@ export const GAME_DECKS: GameDeck[] = [
         id: 'dnr-20',
         type: 'dilemma',
         kicker: 'Steamy & Unfiltered',
-        prompt: 'Final Card — What happens the second we close this app?',
+        prompt: 'Final Card: What happens the second we close this app?',
         options: [
-          'Clothes come off—no talking needed',
+          'Clothes come off, no talking needed',
           'One last dare before we start round one',
         ],
       },
@@ -984,13 +984,13 @@ export const GAME_DECKS: GameDeck[] = [
         id: 'ah-06',
         type: 'open',
         kicker: 'After Hours · Confession',
-        prompt: 'What’s a fantasy you’ve never told me out loud—until right now?',
+        prompt: 'What’s a fantasy you’ve never told me out loud until right now?',
       },
       {
         id: 'ah-07',
         type: 'open',
         kicker: 'After Hours · Confession',
-        prompt: 'What outfit—or lack of one—drives you completely crazy on me?',
+        prompt: 'What outfit (or lack of one) drives you completely crazy on me?',
       },
       {
         id: 'ah-08',
@@ -1008,7 +1008,7 @@ export const GAME_DECKS: GameDeck[] = [
         id: 'ah-10',
         type: 'open',
         kicker: 'After Hours · Confession',
-        prompt: 'What is the boldest place we’ve ever kissed or almost got caught—and would you do it again?',
+        prompt: 'What is the boldest place we’ve ever kissed or almost got caught, and would you do it again?',
       },
       {
         id: 'ah-11',
@@ -1020,7 +1020,7 @@ export const GAME_DECKS: GameDeck[] = [
         id: 'ah-12',
         type: 'open',
         kicker: 'After Hours · Confession',
-        prompt: 'What is one thing I did in bed—or on the couch—that caught you off guard in the best way?',
+        prompt: 'What is one thing I did in bed, or on the couch, that caught you off guard in the best way?',
       },
       {
         id: 'ah-13',
@@ -1097,7 +1097,7 @@ export const GAME_DECKS: GameDeck[] = [
         options: [
           'Excruciatingly slow buildup with zero rush',
           'Playful tension that flips serious fast',
-          'No talking—just pull me in and take over',
+          'No talking, just pull me in and take over',
           'Switch roles halfway through the night',
         ],
       },
@@ -1119,8 +1119,8 @@ export const GAME_DECKS: GameDeck[] = [
         kicker: 'After Hours · Guessing Card',
         prompt: 'Who is breaking first tonight?',
         options: [
-          'Me—within five minutes',
-          'Your partner—all talk until it gets real',
+          'Me, within five minutes',
+          'Your partner: all talk until it gets real',
           'Both of us at the exact same second',
           'Whoever draws the next dare',
         ],
@@ -1150,7 +1150,7 @@ export const GAME_DECKS: GameDeck[] = [
         type: 'open',
         kicker: 'After Hours · Dare',
         timerSeconds: 20,
-        prompt: 'Trace your fingers gently along your partner’s neck, collarbone, or jawline for twenty seconds—no rushing.',
+        prompt: 'Trace your fingers gently along your partner’s neck, collarbone, or jawline for twenty seconds. No rushing.',
       },
       {
         id: 'ah-27',
@@ -1162,7 +1162,7 @@ export const GAME_DECKS: GameDeck[] = [
         id: 'ah-28',
         type: 'open',
         kicker: 'After Hours · Dare',
-        prompt: 'Press three slow kisses anywhere on your partner—except their lips.',
+        prompt: 'Press three slow kisses anywhere on your partner, except their lips.',
       },
       {
         id: 'ah-29',

@@ -227,7 +227,7 @@ export function createSeedDatabase(): CouplyDatabase {
         card_id: 'ah-26',
         deck_id: 'after-hours',
         deck_title: 'After Hours',
-        title: '10-minute neck & shoulder rub — no rushing',
+        title: '10-minute neck & shoulder rub, no rushing',
         owed_by: 'me',
         redeemed: false,
         redeemed_at: null,
@@ -453,7 +453,7 @@ async function hydrateFromPgOrLocal(dbPath: string): Promise<CouplyDatabase> {
         host,
         lastError: null,
       };
-      console.log(`[Couplova Store] PostgreSQL connected (${host ?? 'remote'}) — ${normalized.users.length} users hydrated.`);
+      console.log(`[Couplova Store] PostgreSQL connected (${host ?? 'remote'}): ${normalized.users.length} users hydrated.`);
       return normalized;
     }
 

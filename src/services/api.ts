@@ -248,6 +248,12 @@ export const couplyApi = {
     return apiFetch<PublicAuthConfig>('/api/auth/public-config');
   },
 
+  checkUsername(username: string) {
+    return apiFetch<{ available: boolean; error?: string }>(
+      `/api/auth/check-username?username=${encodeURIComponent(username.trim())}`,
+    );
+  },
+
   signup(payload: {
     fullName: string;
     username: string;

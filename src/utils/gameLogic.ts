@@ -225,7 +225,7 @@ export function prepareDeckForPlay<T extends { id: string; cards: readonly Story
 }
 
 const MISS_PENALTIES = [
-  '10-second slow kiss—no rushing.',
+  '10-second slow kiss, no rushing.',
   'Owe your partner a 10-minute neck or shoulder rub later.',
   'Maintain unbroken eye contact for 10 full seconds.',
   'Whisper one honest thing you want tonight right in their ear.',
@@ -292,7 +292,7 @@ export function consumeVetoToken(
 
 export function suggestIouFromCard(card: StoryCard, partnerName?: string | null): string {
   const cleanedPrompt = personalizePrompt(card.prompt, partnerName)
-    .replace(/^Final Card — /i, '')
+    .replace(/^Final Card\s*:\s*/i, '')
     .trim();
 
   if (card.kicker?.includes('Dare')) {
@@ -305,5 +305,14 @@ export function suggestIouFromCard(card: StoryCard, partnerName?: string | null)
     return cleanedPrompt;
   }
   return `${cleanedPrompt.slice(0, 87).trimEnd()}...`;
+}
+
+export function resolveCardSwipeDirection(
+  offsetX: number,
+  velocityX: number,
+): 'next' | 'prev' | null {
+  if (offsetX <= -70 || velocityX <= -360) return 'next';
+  if (offsetX >= 70 || velocityX >= 360) return 'prev';
+  return null;
 }
 

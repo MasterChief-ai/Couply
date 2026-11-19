@@ -11,6 +11,7 @@ import {
   personalizePrompt,
   prepareDeckForPlay,
   prevCardIndex,
+  resolveCardSwipeDirection,
   suggestIouFromCard,
   type BlindPredictionOutcome,
   type SessionVetoTokens,
@@ -71,6 +72,7 @@ export function StoryDeckScreen({
   const [cardIndex, setCardIndex] = useState(
     Math.min(Math.max(initialCardIndex, 0), Math.max(deck.cards.length - 1, 0)),
   );
+  const [swipeDirection, setSwipeDirection] = useState<1 | -1>(1);
   const [isCompleted, setIsCompleted] = useState(false);
 
   // Lock In & Match (Blind Prediction) state
@@ -157,6 +159,23 @@ export function StoryDeckScreen({
     return () => window.clearInterval(id);
   }, [phase, stareSecondsLeft]);
 
+  // Keyboard ArrowLeft / ArrowRight support when not typing in an input
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || iouOpen) return;
+      if (e.key === 'ArrowRight' && !isCompleted) {
+        e.preventDefault();
+        handleNext();
+      } else if (e.key === 'ArrowLeft' && (cardIndex > 0 || isCompleted)) {
+        e.preventDefault();
+        handlePrev();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  });
+
   // Reserve cards from other decks or unused slots for Veto replacement
   const reservePool = useMemo(() => {
     const inPlayIds = new Set(cards.map((c) => c.id));
@@ -185,6 +204,7 @@ export function StoryDeckScreen({
   }
 
   function handleNext() {
+    setSwipeDirection(1);
     const res = nextCardIndex(cardIndex, cards.length);
     if (res.completed) {
       resetCardTransientState();
@@ -197,6 +217,7 @@ export function StoryDeckScreen({
   }
 
   function handlePrev() {
+    setSwipeDirection(-1);
     if (isCompleted) {
       setIsCompleted(false);
       return;
@@ -414,7 +435,16 @@ export function StoryDeckScreen({
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.96 }}
               transition={{ duration: 0.2 }}
-              className="text-center space-y-8"
+              drag="x"
+              dragConstraints={{ left: 0, right: 0 }}
+              dragElastic={0.35}
+              dragMomentum={false}
+              onDragEnd={(_e, info) => {
+                if (resolveCardSwipeDirection(info.offset.x, info.velocity.x) === 'prev') {
+                  handlePrev();
+                }
+              }}
+              className="text-center space-y-8 touch-pan-y"
             >
               <div className="space-y-3">
                 <p
@@ -555,7 +585,7 @@ export function StoryDeckScreen({
                   Who is pleading the fifth?
                 </h1>
                 <p className="text-[14px]" style={{ color: deck.mutedTextColor }}>
-                  Dodge this card—but the other person gets to pick the replacement or force a 10-second stare-down.
+                  Dodge this card, and the other person gets to pick the replacement or force a 10-second stare-down.
                 </p>
               </div>
 
@@ -654,7 +684,7 @@ export function StoryDeckScreen({
                   Veto Consequence
                 </p>
                 <h1 className="font-display text-[30px] sm:text-[34px] font-extrabold leading-[1.18] tracking-[-0.03em]">
-                  Eyes locked—or kiss until zero.
+                  Eyes locked, or kiss until zero.
                 </h1>
               </div>
 
@@ -708,7 +738,7 @@ export function StoryDeckScreen({
                   Answer Locked
                 </p>
                 <h1 className="font-display text-[30px] sm:text-[34px] font-extrabold leading-[1.18] tracking-[-0.03em] [text-wrap:balance]">
-                  Hand the phone to {displayPartner} — guess what they picked
+                  Hand the phone to {displayPartner} to guess what they picked
                 </h1>
                 <p className="text-[15px]" style={{ color: deck.mutedTextColor }}>
                   No peeking. Tap below once {displayPartner} has the phone.
@@ -808,7 +838,7 @@ export function StoryDeckScreen({
 
               {predictionOutcome.matched ? (
                 <p className="text-center text-[14px]" style={{ color: deck.mutedTextColor }}>
-                  Direct hit. Zero penalties—take the point and keep moving.
+                  Direct hit. Zero penalties, take the point and keep moving.
                 </p>
               ) : (
                 <div className="text-center space-y-3">
@@ -831,11 +861,24 @@ export function StoryDeckScreen({
           ) : (
             <motion.div
               key={`${currentCard.id}-${phase}`}
-              initial={{ opacity: 0, x: 14 }}
+              data-testid="swipeable-card"
+              initial={{ opacity: 0, x: swipeDirection * 28 }}
               animate={{ opacity: 1, x: 0 }}
-              exit={{ opacity: 0, x: -14 }}
+              exit={{ opacity: 0, x: -swipeDirection * 28 }}
               transition={{ type: 'spring', stiffness: 360, damping: 32 }}
-              className="w-full"
+              drag="x"
+              dragConstraints={{ left: 0, right: 0 }}
+              dragElastic={0.38}
+              dragMomentum={false}
+              onDragEnd={(_e, info) => {
+                const dir = resolveCardSwipeDirection(info.offset.x, info.velocity.x);
+                if (dir === 'next') {
+                  handleNext();
+                } else if (dir === 'prev' && cardIndex > 0) {
+                  handlePrev();
+                }
+              }}
+              className="w-full touch-pan-y cursor-grab active:cursor-grabbing"
             >
               <div className="text-center mb-7">
                 {phase === 'guessing' ? (
@@ -1009,7 +1052,7 @@ export function StoryDeckScreen({
         </AnimatePresence>
       </main>
 
-      {/* Bottom Bar: 1.75px Monochrome SVG Stroke Icons — Save, Cash Later (IOU), Next */}
+      {/* Bottom Bar: 1.75px Monochrome SVG Stroke Icons (Save, Cash Later, Next) */}
       {!isCompleted ? (
         <footer className="w-full max-w-xs mx-auto pb-8 pt-4 px-6 z-20 flex items-center justify-between">
           <button
